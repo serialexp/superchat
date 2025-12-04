@@ -445,6 +445,13 @@ func (a *App) handleKeyboardShortcuts(gtx layout.Context) {
 						e.Modifiers.Contain(key.ModCommand) ||
 						e.Modifiers.Contain(key.ModAlt)
 
+		// When modal is open with editor, only intercept modifier shortcuts and Escape
+		// Let all other keys (text input, navigation) pass through to the editor widget
+		if a.composeModal != nil && !hasModifiers && e.Name != key.NameEscape {
+			// Skip processing - let editor handle this event naturally
+			continue
+		}
+
 		// Convert Gio key event to string format
 		keyStr := a.keyEventToString(e)
 		if keyStr == "" {
@@ -452,36 +459,6 @@ func (a *App) handleKeyboardShortcuts(gtx layout.Context) {
 				log.Printf("[KEYBOARD DEBUG] keyEventToString returned empty for Ctrl event!")
 			}
 			continue
-		}
-
-		// If modal is open and this is a text key (no modifiers), manually insert it into the editor
-		if a.composeModal != nil && !hasModifiers {
-			// Check if this is a navigation key
-			switch e.Name {
-			case key.NameEscape, key.NameReturn, key.NameTab,
-				key.NameUpArrow, key.NameDownArrow, key.NameLeftArrow, key.NameRightArrow:
-				// These are command keys, process them below
-			case key.NameDeleteBackward:
-				// Handle backspace - delete last character
-				currentText := a.composeModal.editor.Text()
-				if len(currentText) > 0 {
-					a.composeModal.editor.SetText(currentText[:len(currentText)-1])
-					if a.window != nil {
-						a.window.Invalidate()
-					}
-				}
-				continue
-			default:
-				// Regular text key - manually insert into editor
-				if keyStr != "" {
-					currentText := a.composeModal.editor.Text()
-					a.composeModal.editor.SetText(currentText + keyStr)
-					if a.window != nil {
-						a.window.Invalidate()
-					}
-					continue
-				}
-			}
 		}
 
 		eventCount++
@@ -1327,10 +1304,10 @@ func (a *App) layoutModalOverlay(gtx layout.Context) layout.Dimensions {
 
 					// Text editor
 					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-						// TODO: Request focus for the editor
-						// Problem: When editor has focus, it consumes ALL keyboard events
-						// including Ctrl+D which we need for sending messages
-						// gtx.Execute(key.FocusCmd{Tag: &a.composeModal.editor})
+						// Request focus for the editor when modal is open
+						// This now works correctly because handleKeyboardShortcuts
+						// only intercepts modifier keys and lets regular text through
+						gtx.Execute(key.FocusCmd{Tag: &a.composeModal.editor})
 
 						// Draw border around editor
 						return widget.Border{

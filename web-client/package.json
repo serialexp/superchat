@@ -4,7 +4,7 @@
   "type": "module",
   "description": "Web client for SuperChat using binschema-generated TypeScript codec",
   "scripts": {
-    "build": "esbuild src/main.ts --bundle --outfile=dist/main.js --sourcemap",
+    "build": "esbuild src/main.ts --bundle --outfile=dist/main.js --sourcemap && cp index.html dist/",
     "build:codec": "esbuild src/SuperChatCodec.ts --outfile=dist/SuperChatCodec.js --format=esm && esbuild src/BitStream.ts --outfile=dist/BitStream.js --format=esm",
     "test": "npm run build:codec && node test-client.js",
     "dev": "esbuild src/main.ts --bundle --outfile=dist/main.js --sourcemap --watch",

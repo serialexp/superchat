@@ -1,4 +1,4 @@
-.PHONY: test coverage coverage-html coverage-lcov coverage-protocol coverage-summary fuzz clean build run-server run-client run-website website docker-build docker-build-push docker-build-server docker-build-website docker-build-binschema docker-run docker-push docker-stop
+.PHONY: test coverage coverage-html coverage-lcov coverage-protocol coverage-summary fuzz clean build run-server run-client run-website website docker-build docker-build-push docker-build-server docker-build-website docker-run docker-push docker-stop
 
 # Run all tests
 test:
@@ -121,12 +121,6 @@ docker-build-website:
 	@VERSION=$$(git describe --tags --always --dirty 2>/dev/null || echo "dev"); \
 	echo "Building website Docker image with version: $$VERSION"; \
 	VERSION=$$VERSION depot bake --load website
-
-# Build only BinSchema website image
-docker-build-binschema:
-	@VERSION=$$(git describe --tags --always --dirty 2>/dev/null || echo "dev"); \
-	echo "Building BinSchema website Docker image with version: $$VERSION"; \
-	VERSION=$$VERSION depot bake --load binschema
 
 docker-run:
 	docker run -d \

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "superchat-desktop",
+  "outputfilename": "superchat-desktop",
+  "frontend:install": "bun install",
+  "frontend:build": "bun run build",
+  "frontend:dev:watcher": "bun run dev",
+  "frontend:dev:serverUrl": "auto",
+  "author": {
+    "name": "Bart Riepe",
+    "email": "bart@serial-experiments.com"
+  },
+  "linux": {
+    "buildFlags": "-tags webkit2_41"
+  }
+}

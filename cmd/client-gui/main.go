@@ -90,10 +90,7 @@ func main() {
 			case app.FrameEvent:
 				gtx := app.NewContext(&ops, e)
 
-				// Process keyboard events BEFORE layout
-				// This allows us to intercept shortcuts like Cmd+D before widgets consume them
-				appUI.HandleGlobalKeyboard(gtx)
-
+				// Layout handles keyboard events internally via handleKeyboardShortcuts()
 				appUI.Layout(gtx)
 				e.Frame(gtx.Ops)
 			}

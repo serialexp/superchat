@@ -65,7 +65,9 @@
       "Bash(go mod tidy:*)",
       "Bash(go doc:*)",
       "Bash(./build-macos-app.sh:*)",
-      "Bash(go list:*)"
+      "Bash(go list:*)",
+      "Bash(wails init:*)",
+      "Bash(wails build:*)"
     ],
     "deny": [],
     "ask": []

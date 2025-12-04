@@ -1,7 +1,0 @@
-node_modules/
-dist/
-.generated/
-.generated-examples/
-.typedoc-output/
-tests-json/
-*.log

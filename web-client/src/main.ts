@@ -105,15 +105,19 @@ class SuperChatClient {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const hostname = window.location.hostname || 'localhost';
 
-    this.servers = [
-      {
+    this.servers = [];
+
+    // Skip "Current Server" for Wails and other non-server hostnames
+    const skipHostnames = ['wails', 'localhost', ''];
+    if (!skipHostnames.includes(hostname)) {
+      this.servers.push({
         name: 'Current Server',
         wsUrl: `ws://${hostname}:8080/ws`,
         wssUrl: `wss://${hostname}:8080/ws`,
         status: 'checking',
         isSecure: protocol === 'wss:'
-      }
-    ];
+      });
+    }
 
     // Only add superchat.win if we're not already on it
     if (hostname !== 'superchat.win') {

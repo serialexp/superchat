@@ -47,7 +47,5 @@ Thumbs.db
 
 # Cache and temporary files
 .gocache/
-tools/binschema/tmp-go/
-tools/binschema/test_output.txt
 
 node_modules

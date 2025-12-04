@@ -37,14 +37,3 @@ website/dist/
 
 # Tooling dependencies
 tools/node_modules/
-tools/binschema/node_modules/
-tools/binschema/rust/
-tools/binschema/go/
-tools/binschema/dist/
-tools/binschema/src/
-tools/binschema/tests-json/
-
-# Required for binschema website Docker build
-!binschema-website/**/*.md
-!tools/binschema/README.md
-!docs/**

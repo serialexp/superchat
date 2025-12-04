@@ -186,30 +186,7 @@ make clean
 # Run load/performance tests
 go build -o loadtest ./cmd/loadtest
 ./loadtest --server localhost:6465 --clients 200 --duration 10s --min-delay 100ms --max-delay 500ms
-
-# BinSchema tests (in tools/binschema/)
-cd tools/binschema
-npm test                                       # Run all BinSchema tests (~0.15s with bun!)
-bun run src/run-tests.ts --filter=<pattern>   # Run specific tests
-bun run src/run-tests.ts --filter=uint16      # Example: only uint16 tests
-bun run src/run-tests.ts --filter=optional    # Example: only optional tests
-
-# Go test suite (in tools/binschema/go/)
-# Uses batched compilation for efficiency (single compilation, ~5-10s vs one-by-one, ~60s)
-cd tools/binschema/go
-go test -v ./test                             # Run all tests with batched compilation
-
-# Test filtering and reporting flags
-TEST_FILTER=primitives go test -v ./test      # Run only tests matching 'primitives'
-TEST_FILTER=bit go test -v ./test             # Run only bitfield tests (bit_order, bitfield, single_bit, etc.)
-TEST_REPORT=summary go test -v ./test         # Print overall statistics
-TEST_REPORT=failed-suites go test -v ./test   # List only test suites with failures
-TEST_REPORT=passing-suites go test -v ./test  # List 100% passing test suites
-TEST_REPORT=failing-tests go test -v ./test   # Show individual failing test cases
-TEST_REPORT=json go test -v ./test            # JSON output for scripting
 ```
-
-**⚠️ Important**: Please use the environment variable flags above for analyzing test results and filtering tests. Custom shell commands are fragile and hard to maintain. If you need a report format that doesn't exist, add it to `test_summary.go` and document it here.
 
 ### Load Testing
 
