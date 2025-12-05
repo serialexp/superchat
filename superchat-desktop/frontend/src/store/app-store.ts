@@ -9,8 +9,25 @@ export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'err
 
 // View states for forum channels
 export enum ViewState {
+  ChannelList = 'channel-list',  // Used when no channel selected
   ThreadList = 'thread-list',
-  ThreadDetail = 'thread-detail'
+  ThreadDetail = 'thread-detail',
+  ChatView = 'chat-view'
+}
+
+// Modal states for keyboard navigation context
+export enum ModalState {
+  None = 'none',
+  Compose = 'compose',
+  Help = 'help',
+  ServerSelector = 'server-selector',
+  ConfirmDelete = 'confirm-delete'
+}
+
+// Focus area for keyboard navigation
+export enum FocusArea {
+  Sidebar = 'sidebar',
+  Content = 'content'
 }
 
 // UI state for compose area
@@ -93,6 +110,14 @@ const [compose, setCompose] = createSignal<ComposeState>({
   replyToMessage: null
 })
 
+// Modal and focus state for keyboard navigation
+const [activeModal, setActiveModal] = createSignal<ModalState>(ModalState.None)
+const [focusArea, setFocusArea] = createSignal<FocusArea>(FocusArea.Sidebar)
+
+// Selection indices for keyboard navigation
+const [selectedChannelIndex, setSelectedChannelIndex] = createSignal<number>(0)
+const [selectedMessageIndex, setSelectedMessageIndex] = createSignal<number>(0)
+
 // Subscription tracking
 const [subscribedChannelId, setSubscribedChannelId] = createSignal<bigint | null>(null)
 const [subscribedThreadId, setSubscribedThreadId] = createSignal<bigint | null>(null)
@@ -152,6 +177,20 @@ export const store = {
 
   get compose() { return compose() },
   setCompose,
+
+  // Modal and focus state
+  get activeModal() { return activeModal() },
+  setActiveModal,
+
+  get focusArea() { return focusArea() },
+  setFocusArea,
+
+  // Selection indices
+  get selectedChannelIndex() { return selectedChannelIndex() },
+  setSelectedChannelIndex,
+
+  get selectedMessageIndex() { return selectedMessageIndex() },
+  setSelectedMessageIndex,
 
   // Subscriptions
   get subscribedChannelId() { return subscribedChannelId() },
@@ -249,7 +288,25 @@ export const storeActions = {
     setActiveThreadId(null)
     setSubscribedChannelId(null)
     setSubscribedThreadId(null)
+    setActiveModal(ModalState.None)
+    setFocusArea(FocusArea.Sidebar)
+    setSelectedChannelIndex(0)
+    setSelectedMessageIndex(0)
     this.clearMessages()
     this.clearCompose()
+  },
+
+  // Open/close modals
+  openModal(modal: ModalState) {
+    setActiveModal(modal)
+  },
+
+  closeModal() {
+    setActiveModal(ModalState.None)
+  },
+
+  // Toggle focus between sidebar and content
+  toggleFocus() {
+    setFocusArea(prev => prev === FocusArea.Sidebar ? FocusArea.Content : FocusArea.Sidebar)
   }
 }

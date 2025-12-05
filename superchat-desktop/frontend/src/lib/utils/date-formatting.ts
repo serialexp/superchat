@@ -1,13 +1,13 @@
 // Date and time formatting utilities for messages
 
 /**
- * Format a Unix timestamp (seconds) to a readable time string
+ * Format a Unix timestamp (milliseconds) to a readable time string
  * - If today: "3:45 PM"
  * - If this year: "Jan 15, 3:45 PM"
  * - If older: "Jan 15, 2024 3:45 PM"
  */
-export function formatMessageTime(timestampSeconds: bigint): string {
-  const date = new Date(Number(timestampSeconds) * 1000)
+export function formatMessageTime(timestampMs: bigint): string {
+  const date = new Date(Number(timestampMs))
   const now = new Date()
 
   const isToday = isSameDay(date, now)
@@ -49,8 +49,8 @@ export function formatMessageTime(timestampSeconds: bigint): string {
  * - If this year: "Monday, January 15"
  * - If older: "Monday, January 15, 2024"
  */
-export function formatDateSeparator(timestampSeconds: bigint): string {
-  const date = new Date(Number(timestampSeconds) * 1000)
+export function formatDateSeparator(timestampMs: bigint): string {
+  const date = new Date(Number(timestampMs))
   const now = new Date()
 
   if (isSameDay(date, now)) {
@@ -96,15 +96,15 @@ export function isSameDay(date1: Date, date2: Date): boolean {
  * Check if a date separator should be shown between two messages
  */
 export function shouldShowDateSeparator(
-  prevTimestamp: bigint | null,
-  currentTimestamp: bigint
+  prevTimestampMs: bigint | null,
+  currentTimestampMs: bigint
 ): boolean {
-  if (prevTimestamp === null) {
+  if (prevTimestampMs === null) {
     return true // Always show separator for first message
   }
 
-  const prevDate = new Date(Number(prevTimestamp) * 1000)
-  const currentDate = new Date(Number(currentTimestamp) * 1000)
+  const prevDate = new Date(Number(prevTimestampMs))
+  const currentDate = new Date(Number(currentTimestampMs))
 
   return !isSameDay(prevDate, currentDate)
 }

@@ -9,6 +9,8 @@ import { selectors } from '../store/selectors'
 interface ThreadListProps {
   threads: Message[]
   onThreadClick: (threadId: bigint) => void
+  selectedIndex: number
+  isFocused: boolean
 }
 
 const ThreadList: Component<ThreadListProps> = (props) => {
@@ -24,18 +26,24 @@ const ThreadList: Component<ThreadListProps> = (props) => {
       >
         <div class="space-y-3">
           <For each={props.threads}>
-            {(thread) => {
+            {(thread, index) => {
               const replyCount = selectors.getReplyCount(thread.message_id)
+              const isSelected = () => props.isFocused && props.selectedIndex === index()
 
               return (
                 <div
                   onClick={() => props.onThreadClick(thread.message_id)}
-                  class="card bg-gradient-to-br from-base-200 to-base-300 shadow-md hover:shadow-lg hover:-translate-y-0.5 transition-all duration-200 cursor-pointer border border-base-300"
+                  class={`card bg-gradient-to-br from-base-200 to-base-300 shadow-md hover:shadow-lg hover:-translate-y-0.5 transition-all duration-200 cursor-pointer border ${
+                    isSelected() ? 'border-primary ring-2 ring-primary' : 'border-base-300'
+                  }`}
                 >
                   <div class="card-body p-4">
                     {/* Thread Header */}
                     <div class="flex items-start justify-between gap-4 mb-2">
                       <div class="flex items-baseline gap-2">
+                        <Show when={isSelected()}>
+                          <span class="text-primary font-bold">▶</span>
+                        </Show>
                         <span class="font-semibold text-xs text-secondary">{thread.author_nickname}</span>
                         <span class="text-xs text-base-content/50">
                           {formatMessageTime(thread.created_at)}

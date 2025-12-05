@@ -1,7 +1,7 @@
 // Thread Detail Component
 // Displays a thread with all nested replies
 
-import { Component, For, Show, createSignal } from 'solid-js'
+import { Component, For, Show } from 'solid-js'
 import type { Message } from '../SuperChatCodec'
 import { formatMessageTime } from '../lib/utils/date-formatting'
 import arrowBendUpLeftIcon from '@phosphor-icons/core/bold/arrow-bend-up-left-bold.svg'
@@ -15,16 +15,22 @@ interface ThreadDetailProps {
   thread: MessageWithReplies | null
   onReply: (messageId: bigint, message: Message) => void
   onBack: () => void
+  selectedMessageId: bigint | null
+  isFocused: boolean
 }
 
 const ThreadDetail: Component<ThreadDetailProps> = (props) => {
+  const isRootSelected = () => props.isFocused && props.thread && props.selectedMessageId === props.thread.message_id
+
   return (
     <div class="flex-1 overflow-y-auto p-4 bg-base-100">
       <Show when={props.thread}>
         {(thread) => (
           <div class="space-y-4">
             {/* Root Message (highlighted) */}
-            <div class="card bg-gradient-to-br from-primary/10 to-primary/5 shadow-lg border-l-4 border-primary relative">
+            <div class={`card bg-gradient-to-br from-primary/10 to-primary/5 shadow-lg border-l-4 border-primary relative ${
+              isRootSelected() ? 'ring-2 ring-primary ring-offset-2' : ''
+            }`}>
               <div class="card-body p-4">
                 {/* Reply button in top-right corner */}
                 <button
@@ -36,6 +42,9 @@ const ThreadDetail: Component<ThreadDetailProps> = (props) => {
                 </button>
 
                 <div class="flex items-baseline gap-2 mb-2">
+                  <Show when={isRootSelected()}>
+                    <span class="text-primary font-bold">▶</span>
+                  </Show>
                   <span class="font-semibold text-xs text-secondary">{thread().author_nickname}</span>
                   <span class="text-xs text-base-content/50">
                     {formatMessageTime(thread().created_at)}
@@ -51,7 +60,15 @@ const ThreadDetail: Component<ThreadDetailProps> = (props) => {
             <Show when={thread().replies.length > 0}>
               <div class="space-y-3">
                 <For each={thread().replies}>
-                  {(reply) => <MessageWithRepliesComponent message={reply} depth={1} onReply={props.onReply} />}
+                  {(reply) => (
+                    <MessageWithRepliesComponent
+                      message={reply}
+                      depth={1}
+                      onReply={props.onReply}
+                      selectedMessageId={props.selectedMessageId}
+                      isFocused={props.isFocused}
+                    />
+                  )}
                 </For>
               </div>
             </Show>
@@ -67,12 +84,18 @@ interface MessageWithRepliesComponentProps {
   message: MessageWithReplies
   depth: number
   onReply: (messageId: bigint, message: Message) => void
+  selectedMessageId: bigint | null
+  isFocused: boolean
 }
 
 const MessageWithRepliesComponent: Component<MessageWithRepliesComponentProps> = (props) => {
+  const isSelected = () => props.isFocused && props.selectedMessageId === props.message.message_id
+
   return (
     <div class={props.depth > 0 ? `ml-6 border-l-2 border-base-300 pl-4` : ''}>
-      <div class="card bg-base-200 hover:bg-base-300 transition-colors relative">
+      <div class={`card bg-base-200 hover:bg-base-300 transition-colors relative ${
+        isSelected() ? 'ring-2 ring-primary ring-offset-1' : ''
+      }`}>
         <div class="card-body p-3">
           {/* Reply button in top-right corner */}
           <button
@@ -84,6 +107,9 @@ const MessageWithRepliesComponent: Component<MessageWithRepliesComponentProps> =
           </button>
 
           <div class="flex items-baseline gap-2 mb-1">
+            <Show when={isSelected()}>
+              <span class="text-primary font-bold">▶</span>
+            </Show>
             <span class="font-semibold text-xs text-secondary">{props.message.author_nickname}</span>
             <span class="text-xs text-base-content/50">
               {formatMessageTime(props.message.created_at)}
@@ -104,6 +130,8 @@ const MessageWithRepliesComponent: Component<MessageWithRepliesComponentProps> =
                 message={reply}
                 depth={props.depth + 1}
                 onReply={props.onReply}
+                selectedMessageId={props.selectedMessageId}
+                isFocused={props.isFocused}
               />
             )}
           </For>

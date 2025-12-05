@@ -1,20 +1,32 @@
-import { Component, createEffect, onCleanup, For, Show, createSignal } from 'solid-js'
+import { Component, createEffect, onCleanup, For, Show, createSignal, createMemo } from 'solid-js'
 import { getProtocolBridge, destroyProtocolBridge } from './lib/protocol-bridge'
-import { store, storeActions, ViewState } from './store/app-store'
+import { store, storeActions, ViewState, ModalState, FocusArea } from './store/app-store'
 import { selectors } from './store/selectors'
 import ChatView from './components/ChatView'
 import ThreadList from './components/ThreadList'
 import ThreadDetail from './components/ThreadDetail'
 import ServerSelector from './components/ServerSelector'
+import ComposeModal from './components/ComposeModal'
 import type { Message } from './SuperChatCodec'
+import {
+  CommandExecutor,
+  ViewState as CmdViewState,
+  ModalState as CmdModalState,
+  useKeyboardShortcuts,
+  useFooterShortcuts
+} from './lib/commands'
 
 const App: Component = () => {
   let bridge = getProtocolBridge()
   let client = bridge.getClient()
   let messageScrollContainer: HTMLDivElement | undefined
+  let chatInputRef: HTMLTextAreaElement | undefined
 
   // Track if user has manually scrolled up
   const [userHasScrolledUp, setUserHasScrolledUp] = createSignal(false)
+
+  // Chat input state (inline input for chat channels)
+  const [chatInput, setChatInput] = createSignal('')
 
   // Initialize with connection screen
   const isConnected = selectors.isConnected
@@ -27,6 +39,224 @@ const App: Component = () => {
   const isCurrentChannelChat = selectors.isCurrentChannelChat
   const isCurrentChannelForum = selectors.isCurrentChannelForum
   const formattedTrafficStats = selectors.formattedTrafficStats
+
+  // Flatten thread messages for keyboard navigation (root + all nested replies in display order)
+  const flattenedThreadMessages = createMemo(() => {
+    const thread = currentThread()
+    if (!thread) return []
+
+    const result: Message[] = []
+
+    // Helper to flatten recursively
+    const flatten = (msg: typeof thread) => {
+      result.push(msg)
+      for (const reply of msg.replies) {
+        flatten(reply)
+      }
+    }
+
+    flatten(thread)
+    return result
+  })
+
+  // Get selected message ID based on current view and selection index
+  const selectedMessageId = createMemo((): bigint | null => {
+    if (store.focusArea !== FocusArea.Content) return null
+
+    if (store.currentView === ViewState.ThreadDetail) {
+      const messages = flattenedThreadMessages()
+      if (store.selectedMessageIndex >= 0 && store.selectedMessageIndex < messages.length) {
+        return messages[store.selectedMessageIndex].message_id
+      }
+    }
+    return null
+  })
+
+  // Command executor for keyboard shortcuts
+  const commandExecutor: CommandExecutor = {
+    getCurrentView: () => {
+      // Map store ViewState to command ViewState
+      if (!isConnected()) return CmdViewState.ChannelList
+      if (!currentChannel()) return CmdViewState.ChannelList
+      if (isCurrentChannelChat()) return CmdViewState.ChatView
+      if (store.currentView === ViewState.ThreadDetail) return CmdViewState.ThreadDetail
+      return CmdViewState.ThreadList
+    },
+    getActiveModal: () => {
+      // Map store ModalState to command ModalState
+      switch (store.activeModal) {
+        case ModalState.Help: return CmdModalState.Help
+        case ModalState.Compose: return CmdModalState.Compose
+        case ModalState.ServerSelector: return CmdModalState.ServerSelector
+        case ModalState.ConfirmDelete: return CmdModalState.ConfirmDelete
+        default: return CmdModalState.None
+      }
+    },
+    hasSelectedChannel: () => store.activeChannelId !== null,
+    hasSelectedMessage: () => store.selectedMessageIndex >= 0,
+    hasSelectedThread: () => currentThreadList().length > 0 && store.selectedMessageIndex >= 0,
+    hasComposeContent: () => store.compose.content.trim().length > 0,
+    canGoBack: () => {
+      // Can go back if:
+      // - A modal is open (close it)
+      // - In thread detail (go to thread list)
+      // - In content focus area (switch to sidebar)
+      // - In sidebar with channel selected (deselect channel)
+      return store.activeModal !== ModalState.None ||
+             store.currentView === ViewState.ThreadDetail ||
+             store.focusArea === FocusArea.Content ||
+             store.activeChannelId !== null
+    },
+    isAdmin: () => false, // TODO: Track admin status
+    isConnected: () => isConnected()
+  }
+
+  // Get footer shortcuts text
+  const footerShortcuts = useFooterShortcuts(commandExecutor)
+
+  // Handle keyboard commands
+  const handleCommand = (actionId: string) => {
+    console.log('[Keyboard] Command:', actionId)
+
+    switch (actionId) {
+      case 'help':
+        storeActions.openModal(ModalState.Help)
+        break
+
+      case 'quit':
+        handleDisconnect()
+        break
+
+      case 'go-back': {
+        // Helper to deselect channel and return to channel list
+        const deselectChannel = () => {
+          if (store.subscribedChannelId !== null) {
+            client.unsubscribeChannel(store.subscribedChannelId)
+            store.setSubscribedChannelId(null)
+          }
+          store.setActiveChannelId(null)
+          store.setCurrentView(ViewState.ChannelList)
+          store.setFocusArea(FocusArea.Sidebar)
+          storeActions.clearMessages()
+        }
+
+        if (store.activeModal !== ModalState.None) {
+          storeActions.closeModal()
+        } else if (store.compose.replyToId !== null) {
+          storeActions.clearCompose()
+        } else if (store.focusArea === FocusArea.Content) {
+          // Escape from content area
+          if (store.currentView === ViewState.ThreadDetail) {
+            // Forum: go back to thread list
+            handleBackToThreadList()
+          } else if (isCurrentChannelChat()) {
+            // Chat channel: go directly back to channel list (no thread list to navigate)
+            deselectChannel()
+          } else {
+            // Forum thread list: switch focus to sidebar first
+            store.setFocusArea(FocusArea.Sidebar)
+          }
+        } else {
+          // Already in sidebar, deselect channel
+          if (store.activeChannelId !== null) {
+            deselectChannel()
+          }
+        }
+        break
+      }
+
+      case 'navigate-up':
+        if (store.focusArea === FocusArea.Sidebar) {
+          const newIndex = Math.max(0, store.selectedChannelIndex - 1)
+          store.setSelectedChannelIndex(newIndex)
+        } else {
+          const newIndex = Math.max(0, store.selectedMessageIndex - 1)
+          store.setSelectedMessageIndex(newIndex)
+        }
+        break
+
+      case 'navigate-down':
+        if (store.focusArea === FocusArea.Sidebar) {
+          const maxIndex = channels().length - 1
+          const newIndex = Math.min(maxIndex, store.selectedChannelIndex + 1)
+          store.setSelectedChannelIndex(newIndex)
+        } else {
+          // Determine max based on view
+          let maxIndex = 0
+          if (isCurrentChannelChat()) {
+            maxIndex = currentChannelMessages().length - 1
+          } else if (store.currentView === ViewState.ThreadList) {
+            maxIndex = currentThreadList().length - 1
+          } else if (store.currentView === ViewState.ThreadDetail) {
+            // Use flattened messages for proper navigation through nested structure
+            maxIndex = flattenedThreadMessages().length - 1
+          }
+          const newIndex = Math.min(Math.max(0, maxIndex), store.selectedMessageIndex + 1)
+          store.setSelectedMessageIndex(newIndex)
+        }
+        break
+
+      case 'select':
+        if (store.focusArea === FocusArea.Sidebar) {
+          const channelsList = channels()
+          if (channelsList.length > 0 && store.selectedChannelIndex < channelsList.length) {
+            const channel = channelsList[store.selectedChannelIndex]
+            handleJoinChannel(channel.channel_id)
+            store.setFocusArea(FocusArea.Content)
+            store.setSelectedMessageIndex(0)
+          }
+        } else if (store.currentView === ViewState.ThreadList) {
+          const threads = currentThreadList()
+          if (threads.length > 0 && store.selectedMessageIndex < threads.length) {
+            const thread = threads[store.selectedMessageIndex]
+            handleThreadClick(thread.message_id)
+            store.setSelectedMessageIndex(0)
+          }
+        }
+        break
+
+      case 'switch-focus':
+        storeActions.toggleFocus()
+        break
+
+      case 'compose-new-thread':
+        if (currentChannel()) {
+          // Clear any reply context and open compose modal
+          storeActions.clearCompose()
+          storeActions.openModal(ModalState.Compose)
+        }
+        break
+
+      case 'compose-reply':
+        if (store.currentView === ViewState.ThreadDetail) {
+          // Get the selected message from flattened list and set up reply
+          const messages = flattenedThreadMessages()
+          const idx = store.selectedMessageIndex
+          if (idx >= 0 && idx < messages.length) {
+            const msg = messages[idx]
+            handleReply(msg.message_id, msg)
+            storeActions.openModal(ModalState.Compose)
+          }
+        }
+        break
+
+      case 'focus-compose':
+        if (currentChannel()) {
+          storeActions.openModal(ModalState.Compose)
+        }
+        break
+
+      default:
+        console.log('[Keyboard] Unhandled command:', actionId)
+    }
+  }
+
+  // Set up keyboard shortcuts
+  useKeyboardShortcuts(
+    commandExecutor,
+    handleCommand,
+    () => isConnected() || store.activeModal === ModalState.Help
+  )
 
   // Cleanup on unmount
   onCleanup(() => {
@@ -45,6 +275,22 @@ const App: Component = () => {
       client.listMessages(channelId, 0n, 100)
       // Subscribe to real-time updates
       client.subscribeChannel(channelId)
+    }
+  })
+
+  // Auto-focus chat input when entering a chat channel
+  createEffect(() => {
+    const channel = currentChannel()
+    if (channel && channel.type === 0 && chatInputRef) {
+      // Small delay to ensure DOM is ready
+      setTimeout(() => chatInputRef?.focus(), 100)
+    }
+  })
+
+  // Clear chat input when leaving a channel
+  createEffect(() => {
+    if (store.activeChannelId === null) {
+      setChatInput('')
     }
   })
 
@@ -144,6 +390,47 @@ const App: Component = () => {
     })
   }
 
+  const handleComposeSend = (content: string) => {
+    if (!currentChannel()) return
+
+    client.postMessage(
+      currentChannel()!.channel_id,
+      content,
+      store.compose.replyToId
+    )
+
+    storeActions.clearCompose()
+    storeActions.closeModal()
+  }
+
+  const handleComposeCancel = () => {
+    storeActions.clearCompose()
+    storeActions.closeModal()
+  }
+
+  // Send chat message (inline input, not modal)
+  const handleChatSend = () => {
+    const content = chatInput().trim()
+    if (!content || !currentChannel()) return
+
+    client.postMessage(
+      currentChannel()!.channel_id,
+      content,
+      null // No reply-to for chat messages
+    )
+
+    setChatInput('')
+  }
+
+  // Handle keydown in chat input
+  const handleChatInputKeyDown = (e: KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      handleChatSend()
+    }
+    // Escape is handled by the global keyboard handler (go-back)
+  }
+
   return (
     <div class="min-h-screen bg-base-100 flex flex-col overflow-hidden">
       {/* Server Selector - First Screen */}
@@ -192,19 +479,28 @@ const App: Component = () => {
               </h3>
               <div class="space-y-1">
                 <For each={channels()}>
-                  {(channel) => (
-                    <button
-                      onClick={() => handleJoinChannel(channel.channel_id)}
-                      class={`btn btn-ghost w-full justify-start text-left ${
-                        store.activeChannelId === channel.channel_id ? 'btn-active' : ''
-                      }`}
-                    >
-                      <span class="font-mono text-primary">
-                        {channel.type === 0 ? '>' : '#'}
-                      </span>
-                      <span class="truncate">{channel.name}</span>
-                    </button>
-                  )}
+                  {(channel, index) => {
+                    const isSelected = () => store.activeChannelId === channel.channel_id
+                    const isKeyboardSelected = () =>
+                      store.focusArea === FocusArea.Sidebar && store.selectedChannelIndex === index()
+
+                    return (
+                      <button
+                        onClick={() => {
+                          store.setSelectedChannelIndex(index())
+                          handleJoinChannel(channel.channel_id)
+                        }}
+                        class={`btn btn-ghost w-full justify-start text-left ${
+                          isSelected() ? 'btn-active' : ''
+                        } ${isKeyboardSelected() ? 'ring-2 ring-primary ring-offset-1' : ''}`}
+                      >
+                        <span class="font-mono text-primary">
+                          {channel.type === 0 ? '>' : '#'}
+                        </span>
+                        <span class="truncate">{channel.name}</span>
+                      </button>
+                    )
+                  }}
                 </For>
               </div>
             </div>
@@ -259,7 +555,7 @@ const App: Component = () => {
 
               {/* Message Display Area - Conditional rendering based on channel type and view */}
               <Show when={isCurrentChannelChat()}>
-                {/* Chat Channel: Flat message list */}
+                {/* Chat Channel: Flat message list + inline input */}
                 <div class="relative flex-1 flex flex-col overflow-hidden">
                   <div
                     ref={messageScrollContainer}
@@ -272,11 +568,32 @@ const App: Component = () => {
                   </div>
                   {/* Scroll indicator */}
                   <Show when={userHasScrolledUp()}>
-                    <div class="absolute bottom-4 right-4 badge badge-primary gap-2 pointer-events-none">
+                    <div class="absolute bottom-16 right-4 badge badge-primary gap-2 pointer-events-none">
                       <span>↓</span>
                       <span>Scrolled up</span>
                     </div>
                   </Show>
+                </div>
+                {/* Inline chat input */}
+                <div class="border-t border-base-300 p-3 bg-base-100">
+                  <div class="flex gap-2">
+                    <textarea
+                      ref={chatInputRef}
+                      value={chatInput()}
+                      onInput={(e) => setChatInput(e.currentTarget.value)}
+                      onKeyDown={handleChatInputKeyDown}
+                      placeholder="Type a message..."
+                      rows={2}
+                      class="textarea textarea-bordered flex-1 resize-none focus:textarea-primary"
+                    />
+                    <button
+                      onClick={handleChatSend}
+                      disabled={!chatInput().trim()}
+                      class="btn btn-primary self-end"
+                    >
+                      Send
+                    </button>
+                  </div>
                 </div>
               </Show>
 
@@ -288,6 +605,8 @@ const App: Component = () => {
                     <ThreadList
                       threads={currentThreadList()}
                       onThreadClick={handleThreadClick}
+                      selectedIndex={store.selectedMessageIndex}
+                      isFocused={store.focusArea === FocusArea.Content}
                     />
                   }
                 >
@@ -296,88 +615,125 @@ const App: Component = () => {
                     thread={currentThread()}
                     onReply={handleReply}
                     onBack={handleBackToThreadList}
+                    selectedMessageId={selectedMessageId()}
+                    isFocused={store.focusArea === FocusArea.Content}
                   />
                 </Show>
               </Show>
 
-              {/* Compose Area */}
-              <Show when={
-                // Chat channels: always show
-                isCurrentChannelChat() ||
-                // Forum thread list: show for new threads
-                (isCurrentChannelForum() && store.currentView === ViewState.ThreadList) ||
-                // Forum thread detail: only show when replying
-                (isCurrentChannelForum() && store.currentView === ViewState.ThreadDetail && store.compose.replyToId !== null)
-              }>
-                <div class="border-t border-base-300 p-4 flex-shrink-0">
-                  {/* Reply Context */}
-                  <Show when={store.compose.replyToMessage}>
-                    <div class="mb-2 p-2 bg-base-200 rounded-lg flex items-center justify-between">
-                      <div class="flex-1">
-                        <span class="text-xs text-base-content/70">Replying to </span>
-                        <span class="text-xs font-semibold">{store.compose.replyToMessage!.author_nickname}</span>
-                        <span class="text-xs text-base-content/70">: </span>
-                        <span class="text-xs text-base-content/60">
-                          {store.compose.replyToMessage!.content.slice(0, 50)}
-                          {store.compose.replyToMessage!.content.length > 50 ? '...' : ''}
-                        </span>
-                      </div>
-                      <button
-                        onClick={() => storeActions.clearCompose()}
-                        class="btn btn-ghost btn-xs btn-circle"
-                        title="Cancel reply"
-                      >
-                        ✕
-                      </button>
-                    </div>
-                  </Show>
-
-                  <div class="flex gap-2">
-                    <input
-                      type="text"
-                      placeholder={
-                        isCurrentChannelChat() ? 'Type a message...' :
-                        store.currentView === ViewState.ThreadList ? 'Start a new conversation...' :
-                        'Type your reply...'
-                      }
-                      class="input input-bordered flex-1"
-                      value={store.compose.content}
-                      onInput={(e) => storeActions.updateCompose({ content: e.currentTarget.value })}
-                      onKeyPress={(e) => {
-                        if (e.key === 'Enter' && !e.shiftKey) {
-                          e.preventDefault()
-                          if (store.compose.content.trim() && currentChannel()) {
-                            client.postMessage(
-                              currentChannel()!.channel_id,
-                              store.compose.content,
-                              store.compose.replyToId
-                            )
-                          }
-                        }
-                      }}
-                    />
-                    <button
-                      class="btn btn-primary"
-                      disabled={!store.compose.content.trim()}
-                      onClick={() => {
-                        if (store.compose.content.trim() && currentChannel()) {
-                          client.postMessage(
-                            currentChannel()!.channel_id,
-                            store.compose.content,
-                            store.compose.replyToId
-                          )
-                        }
-                      }}
-                    >
-                      Send
-                    </button>
-                  </div>
-                </div>
-              </Show>
             </Show>
+
+            {/* Keyboard shortcuts footer */}
+            <div class="border-t border-base-300 px-4 py-2 flex-shrink-0 bg-base-200">
+              <div class="flex justify-between items-center">
+                <div class="text-xs text-base-content/60 font-mono">
+                  {footerShortcuts()}
+                </div>
+                <div class="text-xs text-base-content/40">
+                  <Show when={store.focusArea === FocusArea.Sidebar}>
+                    <span class="badge badge-outline badge-xs">Sidebar</span>
+                  </Show>
+                  <Show when={store.focusArea === FocusArea.Content}>
+                    <span class="badge badge-outline badge-xs">Content</span>
+                  </Show>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </Show>
+
+      {/* Help Modal */}
+      <Show when={store.activeModal === ModalState.Help}>
+        <div
+          class="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+          onClick={() => storeActions.closeModal()}
+        >
+          <div
+            class="bg-base-100 rounded-lg shadow-xl max-w-lg w-full mx-4 max-h-[80vh] overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div class="p-4 border-b border-base-300 flex justify-between items-center">
+              <h2 class="text-lg font-bold">Keyboard Shortcuts</h2>
+              <button
+                onClick={() => storeActions.closeModal()}
+                class="btn btn-ghost btn-sm btn-circle"
+              >
+                ✕
+              </button>
+            </div>
+            <div class="p-4 overflow-y-auto max-h-[60vh]">
+              <div class="space-y-4">
+                <div>
+                  <h3 class="font-semibold text-sm text-base-content/70 mb-2">Navigation</h3>
+                  <div class="space-y-1">
+                    <div class="flex justify-between text-sm">
+                      <span class="font-mono text-primary">↑/↓ or K/J</span>
+                      <span class="text-base-content/70">Move selection</span>
+                    </div>
+                    <div class="flex justify-between text-sm">
+                      <span class="font-mono text-primary">Enter</span>
+                      <span class="text-base-content/70">Select item</span>
+                    </div>
+                    <div class="flex justify-between text-sm">
+                      <span class="font-mono text-primary">Tab</span>
+                      <span class="text-base-content/70">Switch focus (sidebar/content)</span>
+                    </div>
+                    <div class="flex justify-between text-sm">
+                      <span class="font-mono text-primary">Esc</span>
+                      <span class="text-base-content/70">Go back / Close</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div>
+                  <h3 class="font-semibold text-sm text-base-content/70 mb-2">Messaging</h3>
+                  <div class="space-y-1">
+                    <div class="flex justify-between text-sm">
+                      <span class="font-mono text-primary">N</span>
+                      <span class="text-base-content/70">New thread (forum)</span>
+                    </div>
+                    <div class="flex justify-between text-sm">
+                      <span class="font-mono text-primary">R</span>
+                      <span class="text-base-content/70">Reply to message</span>
+                    </div>
+                    <div class="flex justify-between text-sm">
+                      <span class="font-mono text-primary">I</span>
+                      <span class="text-base-content/70">Focus compose (chat)</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div>
+                  <h3 class="font-semibold text-sm text-base-content/70 mb-2">General</h3>
+                  <div class="space-y-1">
+                    <div class="flex justify-between text-sm">
+                      <span class="font-mono text-primary">H or ?</span>
+                      <span class="text-base-content/70">Show this help</span>
+                    </div>
+                    <div class="flex justify-between text-sm">
+                      <span class="font-mono text-primary">Q</span>
+                      <span class="text-base-content/70">Disconnect</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="p-4 border-t border-base-300 text-center">
+              <span class="text-xs text-base-content/50">Press Esc to close</span>
+            </div>
+          </div>
+        </div>
+      </Show>
+
+      {/* Compose Modal */}
+      <ComposeModal
+        isOpen={store.activeModal === ModalState.Compose}
+        replyTo={store.compose.replyToMessage}
+        channelName={currentChannel()?.name || ''}
+        onSend={handleComposeSend}
+        onCancel={handleComposeCancel}
+      />
     </div>
   )
 }
