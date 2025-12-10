@@ -97,3 +97,34 @@ func (m *Message) MentionedContent() string {
 func (m *Message) IsFromUser() bool {
 	return m.AuthorUserID != nil
 }
+
+// Channel represents a chat channel.
+type Channel struct {
+	ID              uint64
+	Name            string
+	Description     string
+	UserCount       uint32
+	Type            uint8  // 0 = threaded forum, 1 = linear chat
+	RetentionHours  uint32
+	HasSubchannels  bool
+	SubchannelCount uint16
+}
+
+// IsChat returns true if this is a linear chat channel (not threaded).
+func (c *Channel) IsChat() bool {
+	return c.Type == 1
+}
+
+// IsForum returns true if this is a threaded forum channel.
+func (c *Channel) IsForum() bool {
+	return c.Type == 0
+}
+
+// Subchannel represents a subchannel within a channel.
+type Subchannel struct {
+	ID             uint64
+	Name           string
+	Description    string
+	Type           uint8
+	RetentionHours uint32
+}

@@ -427,3 +427,205 @@ func (b *Bot) fetchMessages(channelID uint64, parentID *uint64, limit uint16) ([
 
 	return messages, nil
 }
+
+// =============================================================================
+// Public API for proactive messaging
+// =============================================================================
+
+// FetchChannels returns all available channels on the server.
+func (b *Bot) FetchChannels() ([]Channel, error) {
+	frame, err := b.conn.sendAndWait(protocol.TypeListChannels, &protocol.ListChannelsMessage{}, b.config.ResponseTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("list channels: %w", err)
+	}
+	if err := expectType(frame, protocol.TypeChannelList); err != nil {
+		return nil, err
+	}
+
+	resp := &protocol.ChannelListMessage{}
+	if err := resp.Decode(frame.Payload); err != nil {
+		return nil, fmt.Errorf("decode channel list: %w", err)
+	}
+
+	channels := make([]Channel, len(resp.Channels))
+	for i, ch := range resp.Channels {
+		channels[i] = Channel{
+			ID:              ch.ID,
+			Name:            ch.Name,
+			Description:     ch.Description,
+			UserCount:       ch.UserCount,
+			Type:            ch.Type,
+			RetentionHours:  ch.RetentionHours,
+			HasSubchannels:  ch.HasSubchannels,
+			SubchannelCount: ch.SubchannelCount,
+		}
+	}
+
+	return channels, nil
+}
+
+// FetchSubchannels returns subchannels for a given channel.
+func (b *Bot) FetchSubchannels(channelName string) ([]Subchannel, error) {
+	b.channelsMu.RLock()
+	channelID, ok := b.channels[channelName]
+	b.channelsMu.RUnlock()
+
+	if !ok {
+		return nil, fmt.Errorf("not joined to channel %q", channelName)
+	}
+
+	return b.FetchSubchannelsByID(channelID)
+}
+
+// FetchSubchannelsByID returns subchannels for a channel by ID.
+func (b *Bot) FetchSubchannelsByID(channelID uint64) ([]Subchannel, error) {
+	msg := &protocol.GetSubchannelsMessage{ChannelID: channelID}
+	frame, err := b.conn.sendAndWait(protocol.TypeGetSubchannels, msg, b.config.ResponseTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("get subchannels: %w", err)
+	}
+	if err := expectType(frame, protocol.TypeSubchannelList); err != nil {
+		return nil, err
+	}
+
+	resp := &protocol.SubchannelListMessage{}
+	if err := resp.Decode(frame.Payload); err != nil {
+		return nil, fmt.Errorf("decode subchannel list: %w", err)
+	}
+
+	subchannels := make([]Subchannel, len(resp.Subchannels))
+	for i, sub := range resp.Subchannels {
+		subchannels[i] = Subchannel{
+			ID:             sub.ID,
+			Name:           sub.Name,
+			Description:    sub.Description,
+			Type:           sub.Type,
+			RetentionHours: sub.RetentionHours,
+		}
+	}
+
+	return subchannels, nil
+}
+
+// FetchThreads fetches recent root messages (threads) from a channel.
+// Use subchannelID to filter by subchannel, or nil for the main channel.
+func (b *Bot) FetchThreads(channelName string, subchannelID *uint64, limit uint16) ([]Message, error) {
+	b.channelsMu.RLock()
+	channelID, ok := b.channels[channelName]
+	b.channelsMu.RUnlock()
+
+	if !ok {
+		return nil, fmt.Errorf("not joined to channel %q", channelName)
+	}
+
+	return b.fetchMessagesWithSubchannel(channelID, subchannelID, nil, limit)
+}
+
+// FetchReplies fetches replies to a specific thread.
+func (b *Bot) FetchReplies(channelID uint64, threadID uint64, limit uint16) ([]Message, error) {
+	return b.fetchMessagesWithSubchannel(channelID, nil, &threadID, limit)
+}
+
+// Post creates a new thread in a channel.
+// Use subchannelID to post to a subchannel, or nil for the main channel.
+func (b *Bot) Post(channelName string, subchannelID *uint64, content string) (*PostMessageResult, error) {
+	b.channelsMu.RLock()
+	channelID, ok := b.channels[channelName]
+	b.channelsMu.RUnlock()
+
+	if !ok {
+		return nil, fmt.Errorf("not joined to channel %q", channelName)
+	}
+
+	return b.postMessageFull(channelID, subchannelID, nil, content)
+}
+
+// PostReply posts a reply to an existing message.
+func (b *Bot) PostReply(channelID uint64, parentID uint64, content string) (*PostMessageResult, error) {
+	return b.postMessageFull(channelID, nil, &parentID, content)
+}
+
+// GetChannelID returns the ID for a joined channel by name.
+func (b *Bot) GetChannelID(channelName string) (uint64, bool) {
+	b.channelsMu.RLock()
+	defer b.channelsMu.RUnlock()
+	id, ok := b.channels[channelName]
+	return id, ok
+}
+
+// postMessageFull is the internal method that handles all posting variations.
+func (b *Bot) postMessageFull(channelID uint64, subchannelID *uint64, parentID *uint64, content string) (*PostMessageResult, error) {
+	msg := &protocol.PostMessageMessage{
+		ChannelID:    channelID,
+		SubchannelID: subchannelID,
+		ParentID:     parentID,
+		Content:      content,
+	}
+
+	frame, err := b.conn.sendAndWait(protocol.TypePostMessage, msg, b.config.ResponseTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("post message: %w", err)
+	}
+	if err := expectType(frame, protocol.TypeMessagePosted); err != nil {
+		return nil, err
+	}
+
+	resp := &protocol.MessagePostedMessage{}
+	if err := resp.Decode(frame.Payload); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+
+	// Track that we participated in this thread
+	threadID := resp.MessageID
+	if parentID != nil {
+		threadID = *parentID
+	}
+	b.myThreadsMu.Lock()
+	b.myThreads[threadID] = true
+	b.myThreadsMu.Unlock()
+
+	return &PostMessageResult{
+		MessageID: resp.MessageID,
+		Timestamp: time.Now(),
+	}, nil
+}
+
+// fetchMessagesWithSubchannel fetches messages with full options.
+func (b *Bot) fetchMessagesWithSubchannel(channelID uint64, subchannelID *uint64, parentID *uint64, limit uint16) ([]Message, error) {
+	msg := &protocol.ListMessagesMessage{
+		ChannelID:    channelID,
+		SubchannelID: subchannelID,
+		ParentID:     parentID,
+		Limit:        limit,
+	}
+
+	frame, err := b.conn.sendAndWait(protocol.TypeListMessages, msg, b.config.ResponseTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("list messages: %w", err)
+	}
+	if err := expectType(frame, protocol.TypeMessageList); err != nil {
+		return nil, err
+	}
+
+	resp := &protocol.MessageListMessage{}
+	if err := resp.Decode(frame.Payload); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+
+	messages := make([]Message, len(resp.Messages))
+	for i, m := range resp.Messages {
+		messages[i] = Message{
+			ID:             m.ID,
+			ChannelID:      m.ChannelID,
+			ParentID:       m.ParentID,
+			AuthorUserID:   m.AuthorUserID,
+			AuthorNickname: m.AuthorNickname,
+			Content:        m.Content,
+			CreatedAt:      m.CreatedAt,
+			ReplyCount:     m.ReplyCount,
+			botNickname:    b.nickname,
+		}
+	}
+
+	return messages, nil
+}
