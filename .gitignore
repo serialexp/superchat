@@ -14,6 +14,8 @@ client.lcov
 /superchat
 /superchat-gui
 /superchat-client
+/superchat-bot
+/superchat-simulator
 /client
 /server
 *.exe
