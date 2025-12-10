@@ -85,10 +85,13 @@ type Model struct {
 	currentView ViewState // DEPRECATED: will be removed during migration
 
 	// Server state
-	serverConfig     *protocol.ServerConfigMessage
-	channels         []protocol.Channel
-	currentChannel   *protocol.Channel
-	threads          []protocol.Message // Root messages
+	serverConfig       *protocol.ServerConfigMessage
+	channels           []protocol.Channel
+	currentChannel     *protocol.Channel
+	expandedChannelID  *uint64                   // Which channel is expanded in sidebar (nil = none)
+	subchannels        []protocol.SubchannelInfo // Subchannels for the expanded channel
+	loadingSubchannels bool                      // Whether subchannels are being loaded
+	threads            []protocol.Message        // Root messages
 	currentThread    *protocol.Message
 	threadReplies    []protocol.Message // All replies in current thread
 	onlineUsers      uint32
@@ -1679,6 +1682,76 @@ func (m *Model) showComposeWithWarning(mode modal.ComposeMode, initialContent st
 		// Go directly to compose
 		m.showComposeModal(mode, initialContent)
 	}
+}
+
+// ChannelListItem represents an item in the channel list (channel or subchannel)
+type ChannelListItem struct {
+	IsChannel    bool
+	ChannelIndex int                      // Index into m.channels (for channels)
+	Channel      *protocol.Channel        // The channel (for channels or parent for subchannels)
+	Subchannel   *protocol.SubchannelInfo // The subchannel (nil for channels)
+}
+
+// getVisibleChannelListItemCount returns the total number of visible items in the channel list
+func (m *Model) getVisibleChannelListItemCount() int {
+	count := len(m.channels)
+	if m.expandedChannelID != nil {
+		// Add subchannels for the expanded channel
+		count += len(m.subchannels)
+		if m.loadingSubchannels {
+			count++ // Loading indicator
+		}
+	}
+	return count
+}
+
+// getChannelListItemAtCursor returns the item at the current cursor position
+func (m *Model) getChannelListItemAtCursor() *ChannelListItem {
+	flatIndex := 0
+	for i, channel := range m.channels {
+		if flatIndex == m.channelCursor {
+			ch := channel // Copy to avoid referencing loop variable
+			return &ChannelListItem{
+				IsChannel:    true,
+				ChannelIndex: i,
+				Channel:      &ch,
+				Subchannel:   nil,
+			}
+		}
+		flatIndex++
+
+		// Check if this channel is expanded
+		if m.expandedChannelID != nil && *m.expandedChannelID == channel.ID {
+			if m.loadingSubchannels {
+				if flatIndex == m.channelCursor {
+					// Cursor on loading indicator - treat as on channel
+					ch := channel
+					return &ChannelListItem{
+						IsChannel:    true,
+						ChannelIndex: i,
+						Channel:      &ch,
+						Subchannel:   nil,
+					}
+				}
+				flatIndex++
+			} else {
+				for j := range m.subchannels {
+					if flatIndex == m.channelCursor {
+						ch := channel
+						sub := m.subchannels[j]
+						return &ChannelListItem{
+							IsChannel:    false,
+							ChannelIndex: i,
+							Channel:      &ch,
+							Subchannel:   &sub,
+						}
+					}
+					flatIndex++
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // Message types for bubbletea

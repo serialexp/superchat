@@ -34,6 +34,7 @@ const (
 	ModalDeleteUser
 	ModalDeleteChannel
 	ModalListUsers
+	ModalCreateSubchannel
 )
 
 // String returns the string representation of the modal type
@@ -91,6 +92,8 @@ func (m ModalType) String() string {
 		return "DeleteChannel"
 	case ModalListUsers:
 		return "ListUsers"
+	case ModalCreateSubchannel:
+		return "CreateSubchannel"
 	default:
 		return "Unknown"
 	}

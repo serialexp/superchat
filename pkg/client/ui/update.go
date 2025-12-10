@@ -494,31 +494,102 @@ func (m Model) handleChannelListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "down", "j":
-		if m.channelCursor < len(m.channels)-1 {
+		maxIndex := m.getVisibleChannelListItemCount() - 1
+		if m.channelCursor < maxIndex {
 			m.channelCursor++
 		}
 		return m, nil
 
 	case "enter":
-		if m.channelCursor < len(m.channels) {
-			selectedChannel := m.channels[m.channelCursor]
-			m.currentChannel = &selectedChannel
+		item := m.getChannelListItemAtCursor()
+		if item == nil {
+			return m, nil
+		}
+
+		if item.IsChannel {
+			channel := item.Channel
+			// Check if channel has subchannels
+			if channel.HasSubchannels && channel.SubchannelCount > 0 {
+				// Toggle expand/collapse
+				if m.expandedChannelID != nil && *m.expandedChannelID == channel.ID {
+					// Collapse: clicking on already expanded channel
+					m.expandedChannelID = nil
+					m.subchannels = nil
+					m.loadingSubchannels = false
+				} else {
+					// Expand: request subchannels
+					channelID := channel.ID
+					m.expandedChannelID = &channelID
+					m.subchannels = nil
+					m.loadingSubchannels = true
+					return m, m.requestSubchannels(channel.ID)
+				}
+			} else {
+				// Channel without subchannels - go directly to thread list
+				selectedChannel := *channel
+				m.currentChannel = &selectedChannel
+				m.currentView = ViewThreadList
+				m.loadingMore = false
+				m.allThreadsLoaded = false
+				return m, tea.Batch(
+					m.sendJoinChannel(selectedChannel.ID),
+					m.requestThreadList(selectedChannel.ID),
+					m.sendSubscribeChannel(selectedChannel.ID),
+				)
+			}
+		} else {
+			// Subchannel selected - navigate to it
+			// For now, treat subchannel as a channel (they share the same ID space)
+			subchannelID := item.Subchannel.ID
+			m.currentChannel = &protocol.Channel{
+				ID:             subchannelID,
+				Name:           item.Subchannel.Name,
+				Description:    item.Subchannel.Description,
+				Type:           item.Subchannel.Type,
+				RetentionHours: item.Subchannel.RetentionHours,
+			}
 			m.currentView = ViewThreadList
 			m.loadingMore = false
 			m.allThreadsLoaded = false
 			return m, tea.Batch(
-				m.sendJoinChannel(selectedChannel.ID),
-				m.requestThreadList(selectedChannel.ID),
-				m.sendSubscribeChannel(selectedChannel.ID),
+				m.sendJoinChannel(subchannelID),
+				m.requestThreadList(subchannelID),
+				m.sendSubscribeChannel(subchannelID),
 			)
 		}
 		return m, nil
 
 	case "r":
 		// Refresh channel list
+		m.expandedChannelID = nil
+		m.subchannels = nil
 		return m, m.requestChannelList()
 
+	case "s":
+		// Create subchannel - only works when cursor is on a channel (not subchannel)
+		item := m.getChannelListItemAtCursor()
+		if item != nil && item.IsChannel && item.Channel != nil {
+			channel := item.Channel
+			// Show create subchannel modal
+			m.modalStack.Push(modal.NewCreateSubchannelModal(
+				channel.ID,
+				channel.Name,
+				func(parentID uint64, name, description string, channelType uint8) tea.Cmd {
+					return m.sendCreateSubchannel(parentID, name, description, channelType)
+				},
+				func() tea.Cmd { return nil },
+			))
+		}
+		return m, nil
+
 	case "esc":
+		// If a channel is expanded, collapse it first
+		if m.expandedChannelID != nil {
+			m.expandedChannelID = nil
+			m.subchannels = nil
+			m.loadingSubchannels = false
+			return m, nil
+		}
 		return m, tea.Quit
 	}
 
@@ -818,10 +889,14 @@ func (m Model) handleServerFrame(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 		return m.handleUserInfo(frame)
 	case protocol.TypeChannelList:
 		return m.handleChannelList(frame)
+	case protocol.TypeSubchannelList:
+		return m.handleSubchannelList(frame)
 	case protocol.TypeServerList:
 		return m.handleServerList(frame)
 	case protocol.TypeChannelCreated:
 		return m.handleChannelCreated(frame)
+	case protocol.TypeSubchannelCreated:
+		return m.handleSubchannelCreated(frame)
 	case protocol.TypeChannelDeleted:
 		return m.handleChannelDeleted(frame)
 	case protocol.TypeJoinResponse:
@@ -1161,6 +1236,62 @@ func (m Model) handleChannelList(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 		if err := m.conn.SendMessage(protocol.TypeGetUnreadCounts, unreadMsg); err != nil {
 			m.errorMessage = fmt.Sprintf("Failed to request unread counts: %v", err)
 		}
+	}
+
+	return m, listenForServerFrames(m.conn, m.connGeneration)
+}
+
+// handleSubchannelList processes SUBCHANNEL_LIST (0x96)
+func (m Model) handleSubchannelList(frame *protocol.Frame) (tea.Model, tea.Cmd) {
+	m.loadingSubchannels = false
+
+	msg := &protocol.SubchannelListMessage{}
+	if err := msg.Decode(frame.Payload); err != nil {
+		m.errorMessage = fmt.Sprintf("Failed to decode subchannel list: %v", err)
+		return m, listenForServerFrames(m.conn, m.connGeneration)
+	}
+
+	// Only update if this is for the currently expanded channel
+	if m.expandedChannelID != nil && *m.expandedChannelID == msg.ChannelID {
+		m.subchannels = msg.Subchannels
+	}
+
+	return m, listenForServerFrames(m.conn, m.connGeneration)
+}
+
+// handleSubchannelCreated processes SUBCHANNEL_CREATED (0x88)
+func (m Model) handleSubchannelCreated(frame *protocol.Frame) (tea.Model, tea.Cmd) {
+	msg := &protocol.SubchannelCreatedMessage{}
+	if err := msg.Decode(frame.Payload); err != nil {
+		m.errorMessage = fmt.Sprintf("Failed to decode subchannel created: %v", err)
+		return m, listenForServerFrames(m.conn, m.connGeneration)
+	}
+
+	if msg.Success {
+		m.statusMessage = msg.Message
+
+		// If the parent channel is currently expanded, add the new subchannel to the list
+		if m.expandedChannelID != nil && *m.expandedChannelID == msg.ChannelID {
+			newSubchannel := protocol.SubchannelInfo{
+				ID:             msg.SubchannelID,
+				Name:           msg.Name,
+				Description:    msg.Description,
+				Type:           msg.Type,
+				RetentionHours: msg.RetentionHours,
+			}
+			m.subchannels = append(m.subchannels, newSubchannel)
+		}
+
+		// Update the parent channel's subchannel count
+		for i := range m.channels {
+			if m.channels[i].ID == msg.ChannelID {
+				m.channels[i].SubchannelCount++
+				m.channels[i].HasSubchannels = true
+				break
+			}
+		}
+	} else {
+		m.errorMessage = msg.Message
 	}
 
 	return m, listenForServerFrames(m.conn, m.connGeneration)
@@ -1864,6 +1995,34 @@ func (m Model) requestChannelList() tea.Cmd {
 			Limit:         1000,
 		}
 		if err := m.conn.SendMessage(protocol.TypeListChannels, msg); err != nil {
+			return ErrorMsg{Err: err}
+		}
+		return nil
+	}
+}
+
+func (m Model) requestSubchannels(channelID uint64) tea.Cmd {
+	return func() tea.Msg {
+		msg := &protocol.GetSubchannelsMessage{
+			ChannelID: channelID,
+		}
+		if err := m.conn.SendMessage(protocol.TypeGetSubchannels, msg); err != nil {
+			return ErrorMsg{Err: err}
+		}
+		return nil
+	}
+}
+
+func (m Model) sendCreateSubchannel(parentID uint64, name, description string, channelType uint8) tea.Cmd {
+	return func() tea.Msg {
+		msg := &protocol.CreateSubchannelMessage{
+			ChannelID:      parentID,
+			Name:           name,
+			Description:    description,
+			Type:           channelType,
+			RetentionHours: 168, // Default to 7 days
+		}
+		if err := m.conn.SendMessage(protocol.TypeCreateSubchannel, msg); err != nil {
 			return ErrorMsg{Err: err}
 		}
 		return nil

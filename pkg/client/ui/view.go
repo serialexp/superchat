@@ -652,7 +652,12 @@ func (m Model) buildChannelPaneContentString(availableWidth int) string {
 		// Plus 1 extra for safety/border rendering
 		contentWidth := availableWidth - 3
 
-		for i, channel := range m.channels {
+		// Track position in virtual flat list for cursor
+		flatIndex := 0
+
+		for _, channel := range m.channels {
+			isExpanded := m.expandedChannelID != nil && *m.expandedChannelID == channel.ID
+
 			// Use '>' prefix for chat channels (type 0), '#' for forum channels (type 1)
 			var prefix string
 			if channel.Type == 0 {
@@ -662,39 +667,83 @@ func (m Model) buildChannelPaneContentString(availableWidth int) string {
 			}
 			base := prefix + channel.Name
 
+			// Add expand/collapse indicator if channel has subchannels
+			if channel.HasSubchannels && channel.SubchannelCount > 0 {
+				if isExpanded {
+					base = base + " ▾" // Expanded
+				} else {
+					base = base + " ▸" // Collapsed
+				}
+			}
+
 			var label string
-			if i == m.channelCursor {
+			if flatIndex == m.channelCursor {
 				label = SelectedItemStyle.Render("▶ " + base)
 			} else {
 				label = UnselectedItemStyle.Render("  " + base)
 			}
 
+			// Build right-side indicators (subchannel count + unread count)
+			var rightIndicators []string
+
+			// Add subchannel count indicator (only if not expanded)
+			if channel.HasSubchannels && channel.SubchannelCount > 0 && !isExpanded {
+				subCountStr := fmt.Sprintf("[%d]", channel.SubchannelCount)
+				rightIndicators = append(rightIndicators, MutedTextStyle.Render(subCountStr))
+			}
+
 			// Get unread count for this channel
 			unreadCount := m.unreadCounts[channel.ID]
-
-			// Only show count if there are unread messages
-			var item string
 			if unreadCount > 0 {
 				countStr := formatCount(unreadCount)
+				rightIndicators = append(rightIndicators, MutedTextStyle.Render(countStr))
+			}
 
-				// Calculate padding to push count to the right edge
-				// Use lipgloss.Width to account for ANSI codes in the rendered label
+			var item string
+			if len(rightIndicators) > 0 {
+				rightStr := strings.Join(rightIndicators, " ")
+				// Calculate padding to push indicators to the right edge
 				labelWidth := lipgloss.Width(label)
-				countWidth := len(countStr)
-				// Leave 1 space between label and count
-				paddingWidth := contentWidth - labelWidth - countWidth - 1
+				rightWidth := lipgloss.Width(rightStr)
+				paddingWidth := contentWidth - labelWidth - rightWidth - 1
 				if paddingWidth < 1 {
 					paddingWidth = 1
 				}
 				padding := strings.Repeat(" ", paddingWidth)
-
-				countLabel := MutedTextStyle.Render(countStr)
-				item = label + padding + countLabel
+				item = label + padding + rightStr
 			} else {
-				// No unread count, just show the label
 				item = label
 			}
 			items = append(items, item)
+			flatIndex++
+
+			// If this channel is expanded, show subchannels indented
+			if isExpanded {
+				if m.loadingSubchannels {
+					items = append(items, MutedTextStyle.Render("    "+m.spinner.View()+" Loading..."))
+					flatIndex++
+				} else {
+					for _, sub := range m.subchannels {
+						// Use '>' for chat, '#' for forum
+						var subPrefix string
+						if sub.Type == 0 {
+							subPrefix = ">"
+						} else {
+							subPrefix = "#"
+						}
+						subBase := subPrefix + sub.Name
+
+						var subLabel string
+						if flatIndex == m.channelCursor {
+							subLabel = SelectedItemStyle.Render("  ▶ " + subBase)
+						} else {
+							subLabel = UnselectedItemStyle.Render("    " + subBase)
+						}
+						items = append(items, subLabel)
+						flatIndex++
+					}
+				}
+			}
 		}
 
 		if len(items) == 0 {
