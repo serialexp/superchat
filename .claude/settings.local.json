@@ -67,7 +67,8 @@
       "Bash(./build-macos-app.sh:*)",
       "Bash(go list:*)",
       "Bash(wails init:*)",
-      "Bash(wails build:*)"
+      "Bash(wails build:*)",
+      "Bash(grep:*)"
     ],
     "deny": [],
     "ask": []

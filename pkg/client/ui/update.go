@@ -312,9 +312,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, msg.Cmd
 
 	case EncryptionKeyGeneratedMsg:
-		// Store the generated encryption key
+		// Store the generated encryption keys
 		m.encryptionKeyPub = msg.PublicKey[:]
-		// TODO: Store private key securely using crypto.KeyStore
+		m.encryptionKeyPriv = msg.PrivateKey[:]
+		// TODO: Persist private key using crypto.KeyStore for future sessions
 		m.statusMessage = "Encryption key generated successfully"
 		// Close the encryption setup modal
 		m.modalStack.RemoveByType(modal.ModalEncryptionSetup)
@@ -873,12 +874,25 @@ func (m Model) sendChatMessageWithContent(content string) (Model, tea.Cmd) {
 		return m, nil
 	}
 
+	channelID := m.currentChannel.ID
+	messageContent := content
+
+	// Check if this channel has encryption enabled
+	if key, ok := m.dmChannelKeys[channelID]; ok {
+		encrypted, err := crypto.EncryptMessage(key, []byte(content))
+		if err != nil {
+			m.errorMessage = fmt.Sprintf("Failed to encrypt message: %v", err)
+			return m, nil
+		}
+		messageContent = string(encrypted)
+	}
+
 	// Send POST_MESSAGE
 	msg := &protocol.PostMessageMessage{
-		ChannelID:    m.currentChannel.ID,
+		ChannelID:    channelID,
 		SubchannelID: nil,
 		ParentID:     nil, // Chat channels have no threading
-		Content:      content,
+		Content:      messageContent,
 	}
 
 	return m, func() tea.Msg {
@@ -1520,6 +1534,23 @@ func (m Model) handleMessageList(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 		return m, listenForServerFrames(m.conn, m.connGeneration)
 	}
 
+	// Decrypt messages if channel has encryption enabled
+	if m.currentChannel != nil {
+		if key, ok := m.dmChannelKeys[m.currentChannel.ID]; ok {
+			for i := range msg.Messages {
+				decrypted, err := crypto.DecryptMessage(key, []byte(msg.Messages[i].Content))
+				if err != nil {
+					if m.logger != nil {
+						m.logger.Printf("[DM] Failed to decrypt message %d: %v", msg.Messages[i].ID, err)
+					}
+					msg.Messages[i].Content = "[Encrypted message - decryption failed]"
+				} else {
+					msg.Messages[i].Content = string(decrypted)
+				}
+			}
+		}
+	}
+
 	if msg.ParentID == nil {
 		// Root messages - could be thread list OR chat messages
 		// Check if we're in chat view
@@ -1656,6 +1687,20 @@ func (m Model) handleNewMessage(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 
 	// Convert to protocol.Message
 	newMsg := protocol.Message(*msg)
+
+	// Decrypt content if this channel has encryption enabled
+	if key, ok := m.dmChannelKeys[newMsg.ChannelID]; ok {
+		decrypted, err := crypto.DecryptMessage(key, []byte(newMsg.Content))
+		if err != nil {
+			if m.logger != nil {
+				m.logger.Printf("[DM] Failed to decrypt message %d: %v", newMsg.ID, err)
+			}
+			// Show encrypted indicator instead of garbage
+			newMsg.Content = "[Encrypted message - decryption failed]"
+		} else {
+			newMsg.Content = string(decrypted)
+		}
+	}
 
 	// Add to appropriate list
 	if m.currentChannel != nil && newMsg.ChannelID == m.currentChannel.ID {
@@ -2396,11 +2441,23 @@ func (m Model) requestThreadRepliesAfter(threadID uint64, afterID uint64) tea.Cm
 
 func (m Model) sendPostMessage(channelID uint64, parentID *uint64, content string) tea.Cmd {
 	return func() tea.Msg {
+		messageContent := content
+
+		// Check if this channel has encryption enabled
+		if key, ok := m.dmChannelKeys[channelID]; ok {
+			encrypted, err := crypto.EncryptMessage(key, []byte(content))
+			if err != nil {
+				return ErrorMsg{Err: fmt.Errorf("failed to encrypt message: %w", err)}
+			}
+			// Store encrypted bytes as string (will be binary data)
+			messageContent = string(encrypted)
+		}
+
 		msg := &protocol.PostMessageMessage{
 			ChannelID:    channelID,
 			SubchannelID: nil,
 			ParentID:     parentID,
-			Content:      content,
+			Content:      messageContent,
 		}
 		if err := m.conn.SendMessage(protocol.TypePostMessage, msg); err != nil {
 			return ErrorMsg{Err: err}
@@ -3540,7 +3597,29 @@ func (m Model) handleDMReady(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 
 	if msg.IsEncrypted {
 		dmChannel.OtherPubKey = msg.OtherPublicKey[:]
-		// TODO: Derive channel key using crypto package
+
+		// Derive the channel encryption key
+		if m.encryptionKeyPriv != nil {
+			sharedSecret, err := crypto.ComputeSharedSecret(m.encryptionKeyPriv, msg.OtherPublicKey[:])
+			if err != nil {
+				m.errorMessage = fmt.Sprintf("Failed to compute shared secret: %v", err)
+				return m, listenForServerFrames(m.conn, m.connGeneration)
+			}
+
+			channelKey, err := crypto.DeriveChannelKey(sharedSecret, msg.ChannelID)
+			if err != nil {
+				m.errorMessage = fmt.Sprintf("Failed to derive channel key: %v", err)
+				return m, listenForServerFrames(m.conn, m.connGeneration)
+			}
+
+			m.dmChannelKeys[msg.ChannelID] = channelKey
+			if m.logger != nil {
+				m.logger.Printf("[DM] Derived channel key for channel %d", msg.ChannelID)
+			}
+		} else {
+			m.errorMessage = "Cannot set up encrypted DM: no encryption key available"
+			return m, listenForServerFrames(m.conn, m.connGeneration)
+		}
 	}
 
 	// Check if this DM already exists, update if so

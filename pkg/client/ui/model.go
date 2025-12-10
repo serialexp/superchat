@@ -209,12 +209,13 @@ type Model struct {
 	threadHighestMessageID map[uint64]uint64             // Highest message ID seen per thread
 
 	// Direct Messages (V3)
-	dmChannels       []DMChannel          // Active DM channels
-	pendingDMInvites []DMInvite           // Incoming DM requests awaiting response
-	dmChannelKeys    map[uint64][]byte    // channelID -> derived AES key for encryption
-	encryptionKeyPub []byte               // Our X25519 public key (nil if not set up)
-	dmCursor         int                  // Cursor position in DM list
-	showDMList       bool                 // True when viewing DM list instead of channels
+	dmChannels        []DMChannel          // Active DM channels
+	pendingDMInvites  []DMInvite           // Incoming DM requests awaiting response
+	dmChannelKeys     map[uint64][]byte    // channelID -> derived AES key for encryption
+	encryptionKeyPub  []byte               // Our X25519 public key (nil if not set up)
+	encryptionKeyPriv []byte               // Our X25519 private key (nil if not set up)
+	dmCursor          int                  // Cursor position in DM list
+	showDMList        bool                 // True when viewing DM list instead of channels
 }
 
 // NewModel creates a new application model
