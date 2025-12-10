@@ -12,6 +12,7 @@ client.lcov
 # Build artifacts
 /superchat-server
 /superchat
+/superchat-gui
 /superchat-client
 /client
 /server
