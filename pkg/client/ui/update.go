@@ -540,11 +540,10 @@ func (m Model) handleChannelListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// Pending DM invite selected - show the DM request modal
 			invite := item.PendingDM
 			dmModal := modal.NewDMRequestModal(modal.DMRequestModalConfig{
-				ChannelID:                  invite.ChannelID,
-				FromNickname:               invite.FromNickname,
-				FromUserID:                 invite.FromUserID,
-				RequiresKey:                invite.RequiresKey,
-				InitiatorAllowsUnencrypted: invite.InitiatorAllowsUnencrypted,
+				ChannelID:        invite.ChannelID,
+				FromNickname:     invite.FromNickname,
+				FromUserID:       invite.FromUserID,
+				EncryptionStatus: invite.EncryptionStatus,
 				OnAccept: func(channelID uint64, allowUnencrypted bool) tea.Cmd {
 					return m.sendAllowUnencrypted(channelID, false)
 				},
@@ -3674,17 +3673,16 @@ func (m Model) handleDMRequest(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	}
 
 	if m.logger != nil {
-		m.logger.Printf("[DM] DM_REQUEST: channel=%d, from=%s, requiresKey=%v, allowsUnencrypted=%v",
-			msg.DMChannelID, msg.FromNickname, msg.RequiresKey, msg.InitiatorAllowsUnencrypted)
+		m.logger.Printf("[DM] DM_REQUEST: channel=%d, from=%s, encryptionStatus=%d",
+			msg.DMChannelID, msg.FromNickname, msg.EncryptionStatus)
 	}
 
 	// Add to pending invites
 	invite := DMInvite{
-		ChannelID:                  msg.DMChannelID,
-		FromUserID:                 msg.FromUserID,
-		FromNickname:               msg.FromNickname,
-		RequiresKey:                msg.RequiresKey,
-		InitiatorAllowsUnencrypted: msg.InitiatorAllowsUnencrypted,
+		ChannelID:        msg.DMChannelID,
+		FromUserID:       msg.FromUserID,
+		FromNickname:     msg.FromNickname,
+		EncryptionStatus: msg.EncryptionStatus,
 	}
 
 	// Check if invite already exists
@@ -3702,11 +3700,10 @@ func (m Model) handleDMRequest(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 
 	// Show the DM request modal
 	dmModal := modal.NewDMRequestModal(modal.DMRequestModalConfig{
-		ChannelID:                  msg.DMChannelID,
-		FromNickname:               msg.FromNickname,
-		FromUserID:                 msg.FromUserID,
-		RequiresKey:                msg.RequiresKey,
-		InitiatorAllowsUnencrypted: msg.InitiatorAllowsUnencrypted,
+		ChannelID:        msg.DMChannelID,
+		FromNickname:     msg.FromNickname,
+		FromUserID:       msg.FromUserID,
+		EncryptionStatus: msg.EncryptionStatus,
 		OnAccept: func(channelID uint64, allowUnencrypted bool) tea.Cmd {
 			if allowUnencrypted {
 				return m.sendAllowUnencrypted(channelID, false)

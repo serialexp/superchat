@@ -5,45 +5,43 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/aeolun/superchat/pkg/protocol"
 )
 
 // DMRequestModal shows an incoming DM request for the user to accept or decline
 type DMRequestModal struct {
-	channelID                  uint64
-	fromNickname               string
-	fromUserID                 *uint64
-	requiresKey                bool   // True if we need to set up encryption
-	initiatorAllowsUnencrypted bool   // True if initiator is ok with unencrypted
-	onAccept                   func(channelID uint64, allowUnencrypted bool) tea.Cmd
-	onDecline                  func(channelID uint64) tea.Cmd
-	onSetupEncryption          func(channelID uint64) tea.Cmd
-	cursor                     int // 0=Accept, 1=Decline, 2=Setup Encryption (if available)
+	channelID         uint64
+	fromNickname      string
+	fromUserID        *uint64
+	encryptionStatus  uint8 // 0=not possible, 1=required, 2=optional
+	onAccept          func(channelID uint64, allowUnencrypted bool) tea.Cmd
+	onDecline         func(channelID uint64) tea.Cmd
+	onSetupEncryption func(channelID uint64) tea.Cmd
+	cursor            int // 0=Accept, 1=Decline, 2=Setup Encryption (if available)
 }
 
 // DMRequestModalConfig holds configuration for creating a DM request modal
 type DMRequestModalConfig struct {
-	ChannelID                  uint64
-	FromNickname               string
-	FromUserID                 *uint64
-	RequiresKey                bool
-	InitiatorAllowsUnencrypted bool
-	OnAccept                   func(channelID uint64, allowUnencrypted bool) tea.Cmd
-	OnDecline                  func(channelID uint64) tea.Cmd
-	OnSetupEncryption          func(channelID uint64) tea.Cmd
+	ChannelID         uint64
+	FromNickname      string
+	FromUserID        *uint64
+	EncryptionStatus  uint8
+	OnAccept          func(channelID uint64, allowUnencrypted bool) tea.Cmd
+	OnDecline         func(channelID uint64) tea.Cmd
+	OnSetupEncryption func(channelID uint64) tea.Cmd
 }
 
 // NewDMRequestModal creates a new DM request modal
 func NewDMRequestModal(config DMRequestModalConfig) *DMRequestModal {
 	return &DMRequestModal{
-		channelID:                  config.ChannelID,
-		fromNickname:               config.FromNickname,
-		fromUserID:                 config.FromUserID,
-		requiresKey:                config.RequiresKey,
-		initiatorAllowsUnencrypted: config.InitiatorAllowsUnencrypted,
-		onAccept:                   config.OnAccept,
-		onDecline:                  config.OnDecline,
-		onSetupEncryption:          config.OnSetupEncryption,
-		cursor:                     0,
+		channelID:         config.ChannelID,
+		fromNickname:      config.FromNickname,
+		fromUserID:        config.FromUserID,
+		encryptionStatus:  config.EncryptionStatus,
+		onAccept:          config.OnAccept,
+		onDecline:         config.OnDecline,
+		onSetupEncryption: config.OnSetupEncryption,
+		cursor:            0,
 	}
 }
 
@@ -73,8 +71,9 @@ func (m *DMRequestModal) HandleKey(msg tea.KeyMsg) (bool, Modal, tea.Cmd) {
 		return m.handleSelection()
 
 	case "y":
-		// Quick accept (unencrypted if allowed)
-		if m.initiatorAllowsUnencrypted && m.onAccept != nil {
+		// Quick accept (unencrypted)
+		// Only allowed if encryption is not required
+		if m.encryptionStatus != protocol.DMEncryptionRequired && m.onAccept != nil {
 			return true, nil, m.onAccept(m.channelID, true)
 		}
 		return true, m, nil
@@ -88,8 +87,8 @@ func (m *DMRequestModal) HandleKey(msg tea.KeyMsg) (bool, Modal, tea.Cmd) {
 		return true, nil, cmd
 
 	case "e":
-		// Quick setup encryption
-		if m.requiresKey && m.onSetupEncryption != nil {
+		// Quick setup encryption (only for Required or Optional)
+		if m.encryptionStatus != protocol.DMEncryptionNotPossible && m.onSetupEncryption != nil {
 			return true, nil, m.onSetupEncryption(m.channelID)
 		}
 		return true, m, nil
@@ -101,8 +100,9 @@ func (m *DMRequestModal) HandleKey(msg tea.KeyMsg) (bool, Modal, tea.Cmd) {
 
 func (m *DMRequestModal) numOptions() int {
 	options := 2 // Accept, Decline
-	if m.requiresKey {
-		options++ // Setup Encryption
+	// Show "Setup Encryption" option only if encryption is possible (Required or Optional)
+	if m.encryptionStatus != protocol.DMEncryptionNotPossible {
+		options++
 	}
 	return options
 }
@@ -111,8 +111,11 @@ func (m *DMRequestModal) handleSelection() (bool, Modal, tea.Cmd) {
 	switch m.cursor {
 	case 0: // Accept
 		if m.onAccept != nil {
-			// If encryption is required but not set up, accept as unencrypted
-			allowUnencrypted := m.requiresKey || !m.initiatorAllowsUnencrypted
+			// Determine if we're accepting as unencrypted
+			// For NotPossible: always unencrypted
+			// For Required: should not reach here without setting up encryption first
+			// For Optional: accepting without setup means unencrypted
+			allowUnencrypted := m.encryptionStatus != protocol.DMEncryptionRequired
 			return true, nil, m.onAccept(m.channelID, allowUnencrypted)
 		}
 		return true, nil, nil
@@ -124,7 +127,7 @@ func (m *DMRequestModal) handleSelection() (bool, Modal, tea.Cmd) {
 		return true, nil, nil
 
 	case 2: // Setup Encryption (if available)
-		if m.requiresKey && m.onSetupEncryption != nil {
+		if m.encryptionStatus != protocol.DMEncryptionNotPossible && m.onSetupEncryption != nil {
 			return true, nil, m.onSetupEncryption(m.channelID)
 		}
 		return true, m, nil
@@ -167,21 +170,20 @@ func (m *DMRequestModal) Render(width, height int) string {
 		desc = fmt.Sprintf("%s (anonymous) wants to start a direct message.", m.fromNickname)
 	}
 
-	// Add encryption status
+	// Add encryption status note
 	var encryptionNote string
-	if m.requiresKey {
-		if m.initiatorAllowsUnencrypted {
-			encryptionNote = mutedStyle.Render("\nEncryption available but not required.\nYou can set up encryption or chat unencrypted.")
-		} else {
-			encryptionNote = mutedStyle.Render("\nEncryption required. You need to set up\nan encryption key to chat with this user.")
-		}
-	} else {
-		encryptionNote = mutedStyle.Render("\nThis will be an unencrypted conversation.")
+	switch m.encryptionStatus {
+	case protocol.DMEncryptionNotPossible:
+		encryptionNote = mutedStyle.Render("\nThis will be an unencrypted conversation.\n(The other user has not set up encryption.)")
+	case protocol.DMEncryptionRequired:
+		encryptionNote = mutedStyle.Render("\nEncryption required. You need to set up\nan encryption key to chat with this user.")
+	case protocol.DMEncryptionOptional:
+		encryptionNote = mutedStyle.Render("\nEncryption available. You can set up encryption\nfor a secure conversation, or chat unencrypted.")
 	}
 
 	// Build options
 	options := []string{"Accept", "Decline"}
-	if m.requiresKey {
+	if m.encryptionStatus != protocol.DMEncryptionNotPossible {
 		options = append(options, "Setup Encryption")
 	}
 

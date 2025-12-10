@@ -1342,22 +1342,20 @@ Incoming DM request from another user.
 | dm_channel_id(u64)| from_user_id            | from_nickname (String) |
 |                   | (Optional u64)          |                        |
 +-------------------+-------------------------+------------------------+
-| requires_key(bool)| initiator_allows_unencrypted (bool)            |
-+-------------------+----------------------------------------------------+
+| encryption_status (u8)                                               |
++----------------------------------------------------------------------+
 ```
 
-**requires_key:**
-- True if recipient needs to set up a key before DM can proceed
-- False if recipient already has a key or initiator allows unencrypted
-
-**initiator_allows_unencrypted:**
-- True if initiator is willing to accept unencrypted DMs
-- False if initiator requires encryption
+**encryption_status:**
+- `0` = Encryption not possible - Initiator has no encryption key. Conversation will be unencrypted regardless of recipient's key status.
+- `1` = Encryption required - Initiator has a key and requires encryption. Recipient must set up a key to proceed.
+- `2` = Encryption optional - Initiator has a key but allows unencrypted. Recipient can set up a key for encryption or skip for unencrypted.
 
 **Client should:**
 - Notify user of incoming DM request
-- If `requires_key = true`, prompt for key setup or allow unencrypted
-- If `requires_key = false`, can accept immediately
+- If `encryption_status = 0`, inform user conversation will be unencrypted (no setup option)
+- If `encryption_status = 1`, require key setup before accepting
+- If `encryption_status = 2`, offer choice between setting up encryption or proceeding unencrypted
 
 ### 0x10 - PING (Client → Server)
 

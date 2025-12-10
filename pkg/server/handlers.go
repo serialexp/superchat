@@ -3329,12 +3329,24 @@ func (s *Server) handleStartDM(sess *Session, frame *protocol.Frame) error {
 	}
 
 	// Send DM_REQUEST to target
+	// Determine encryption status for the recipient
+	var encryptionStatus uint8
+	if !initiatorHasKey {
+		// Initiator has no key - encryption is not possible
+		encryptionStatus = protocol.DMEncryptionNotPossible
+	} else if !msg.AllowUnencrypted {
+		// Initiator has key and requires encryption
+		encryptionStatus = protocol.DMEncryptionRequired
+	} else {
+		// Initiator has key but allows unencrypted
+		encryptionStatus = protocol.DMEncryptionOptional
+	}
+
 	request := &protocol.DMRequestMessage{
-		DMChannelID:                uint64(inviteID),
-		FromUserID:                 toUint64Ptr(initiatorUserID),
-		FromNickname:               initiatorNickname,
-		RequiresKey:                !targetHasKey,
-		InitiatorAllowsUnencrypted: msg.AllowUnencrypted,
+		DMChannelID:      uint64(inviteID),
+		FromUserID:       toUint64Ptr(initiatorUserID),
+		FromNickname:     initiatorNickname,
+		EncryptionStatus: encryptionStatus,
 	}
 	s.sendToUserOrSession(targetUserID, targetSession, protocol.TypeDMRequest, request)
 

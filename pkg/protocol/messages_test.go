@@ -2710,33 +2710,30 @@ func TestDMRequestMessage(t *testing.T) {
 		msg  DMRequestMessage
 	}{
 		{
-			name: "encrypted request from registered user",
+			name: "encryption required from registered user",
 			msg: DMRequestMessage{
-				DMChannelID:                12345,
-				FromUserID:                 &userID,
-				FromNickname:               "alice",
-				RequiresKey:                false,
-				InitiatorAllowsUnencrypted: false,
+				DMChannelID:      12345,
+				FromUserID:       &userID,
+				FromNickname:     "alice",
+				EncryptionStatus: DMEncryptionRequired,
 			},
 		},
 		{
-			name: "request requiring key setup",
+			name: "encryption optional",
 			msg: DMRequestMessage{
-				DMChannelID:                99999,
-				FromUserID:                 &userID,
-				FromNickname:               "bob",
-				RequiresKey:                true,
-				InitiatorAllowsUnencrypted: true,
+				DMChannelID:      99999,
+				FromUserID:       &userID,
+				FromNickname:     "bob",
+				EncryptionStatus: DMEncryptionOptional,
 			},
 		},
 		{
-			name: "request from anonymous user",
+			name: "encryption not possible from anonymous user",
 			msg: DMRequestMessage{
-				DMChannelID:                54321,
-				FromUserID:                 nil,
-				FromNickname:               "anon_guest",
-				RequiresKey:                true,
-				InitiatorAllowsUnencrypted: true,
+				DMChannelID:      54321,
+				FromUserID:       nil,
+				FromNickname:     "anon_guest",
+				EncryptionStatus: DMEncryptionNotPossible,
 			},
 		},
 	}
@@ -2752,8 +2749,7 @@ func TestDMRequestMessage(t *testing.T) {
 
 			assert.Equal(t, tt.msg.DMChannelID, decoded.DMChannelID)
 			assert.Equal(t, tt.msg.FromNickname, decoded.FromNickname)
-			assert.Equal(t, tt.msg.RequiresKey, decoded.RequiresKey)
-			assert.Equal(t, tt.msg.InitiatorAllowsUnencrypted, decoded.InitiatorAllowsUnencrypted)
+			assert.Equal(t, tt.msg.EncryptionStatus, decoded.EncryptionStatus)
 
 			if tt.msg.FromUserID != nil {
 				require.NotNil(t, decoded.FromUserID)

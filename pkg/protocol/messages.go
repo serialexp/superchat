@@ -4905,13 +4905,19 @@ func (m *DMPendingMessage) Decode(payload []byte) error {
 	return nil
 }
 
+// DMEncryptionStatus represents the encryption state for a DM request
+const (
+	DMEncryptionNotPossible uint8 = 0 // Initiator has no key, unencrypted only
+	DMEncryptionRequired    uint8 = 1 // Initiator has key and requires encryption
+	DMEncryptionOptional    uint8 = 2 // Initiator has key but allows unencrypted
+)
+
 // DMRequestMessage (0xA4) - Incoming DM request
 type DMRequestMessage struct {
-	DMChannelID               uint64  // The pending DM channel ID
-	FromUserID                *uint64 // Initiator's user ID (nil if anonymous)
-	FromNickname              string  // Initiator's nickname
-	RequiresKey               bool    // True if recipient needs to set up a key
-	InitiatorAllowsUnencrypted bool    // True if initiator allows unencrypted
+	DMChannelID      uint64  // The pending DM channel ID
+	FromUserID       *uint64 // Initiator's user ID (nil if anonymous)
+	FromNickname     string  // Initiator's nickname
+	EncryptionStatus uint8   // 0=not possible, 1=required, 2=optional
 }
 
 func (m *DMRequestMessage) EncodeTo(w io.Writer) error {
@@ -4924,10 +4930,7 @@ func (m *DMRequestMessage) EncodeTo(w io.Writer) error {
 	if err := WriteString(w, m.FromNickname); err != nil {
 		return err
 	}
-	if err := WriteBool(w, m.RequiresKey); err != nil {
-		return err
-	}
-	return WriteBool(w, m.InitiatorAllowsUnencrypted)
+	return WriteUint8(w, m.EncryptionStatus)
 }
 
 func (m *DMRequestMessage) Encode() ([]byte, error) {
@@ -4958,17 +4961,11 @@ func (m *DMRequestMessage) Decode(payload []byte) error {
 	}
 	m.FromNickname = fromNickname
 
-	requiresKey, err := ReadBool(buf)
+	encryptionStatus, err := ReadUint8(buf)
 	if err != nil {
 		return err
 	}
-	m.RequiresKey = requiresKey
-
-	allowsUnencrypted, err := ReadBool(buf)
-	if err != nil {
-		return err
-	}
-	m.InitiatorAllowsUnencrypted = allowsUnencrypted
+	m.EncryptionStatus = encryptionStatus
 	return nil
 }
 

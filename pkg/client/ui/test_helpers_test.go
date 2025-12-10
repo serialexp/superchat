@@ -17,13 +17,13 @@ func NewTestModel() Model {
 	state := client.NewMockState()
 	logger := log.New(io.Discard, "", 0) // Discard logs in tests
 
-	return NewModel(conn, state, "0.0.0-test", false, 0, logger, nil)
+	return NewModel(conn, state, "0.0.0-test", false, 0, logger, "", nil)
 }
 
 // NewTestModelWithMocks creates a Model with provided mocks
 func NewTestModelWithMocks(conn client.ConnectionInterface, state client.StateInterface) Model {
 	logger := log.New(io.Discard, "", 0) // Discard logs in tests
-	return NewModel(conn, state, "0.0.0-test", false, 0, logger, nil)
+	return NewModel(conn, state, "0.0.0-test", false, 0, logger, "", nil)
 }
 
 // SetupTestModelWithDimensions creates a test model with window dimensions set

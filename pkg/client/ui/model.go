@@ -74,11 +74,10 @@ type DMChannel struct {
 
 // DMInvite represents a pending DM request
 type DMInvite struct {
-	ChannelID               uint64
-	FromUserID              *uint64 // nil if initiator is anonymous
-	FromNickname            string
-	RequiresKey             bool // True if we need to set up encryption key
-	InitiatorAllowsUnencrypted bool // True if we can accept unencrypted
+	ChannelID        uint64
+	FromUserID       *uint64 // nil if initiator is anonymous
+	FromNickname     string
+	EncryptionStatus uint8 // 0=not possible, 1=required, 2=optional (see protocol.DMEncryption*)
 }
 
 // Model represents the application state
