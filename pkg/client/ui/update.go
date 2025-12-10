@@ -11,6 +11,7 @@ import (
 	"github.com/aeolun/superchat/pkg/client"
 	"github.com/aeolun/superchat/pkg/client/auth"
 	"github.com/aeolun/superchat/pkg/client/commands"
+	"github.com/aeolun/superchat/pkg/client/crypto"
 	"github.com/aeolun/superchat/pkg/client/ui/modal"
 	"github.com/aeolun/superchat/pkg/protocol"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -310,6 +311,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.modalStack.Push(msg.Modal)
 		return m, msg.Cmd
 
+	case EncryptionKeyGeneratedMsg:
+		// Store the generated encryption key
+		m.encryptionKeyPub = msg.PublicKey[:]
+		// TODO: Store private key securely using crypto.KeyStore
+		m.statusMessage = "Encryption key generated successfully"
+		// Close the encryption setup modal
+		m.modalStack.RemoveByType(modal.ModalEncryptionSetup)
+		return m, nil
+
 	default:
 		// Always update spinner (it manages its own tick messages)
 		var cmd tea.Cmd
@@ -506,7 +516,48 @@ func (m Model) handleChannelListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		if item.IsChannel {
+		switch item.Type {
+		case ChannelListItemDM:
+			// DM channel selected - join it as a chat channel
+			dm := item.DM
+			m.currentChannel = &protocol.Channel{
+				ID:   dm.ChannelID,
+				Name: dm.OtherNickname,
+				Type: 0, // Chat type
+			}
+			m.currentView = ViewChatChannel
+			m.loadingChat = true
+			m.allChatLoaded = false
+			m.chatMessages = nil
+			return m, tea.Batch(
+				m.sendJoinChannel(dm.ChannelID),
+				m.requestChatMessages(dm.ChannelID),
+				m.sendSubscribeChannel(dm.ChannelID),
+			)
+
+		case ChannelListItemPendingDM:
+			// Pending DM invite selected - show the DM request modal
+			invite := item.PendingDM
+			dmModal := modal.NewDMRequestModal(modal.DMRequestModalConfig{
+				ChannelID:                  invite.ChannelID,
+				FromNickname:               invite.FromNickname,
+				FromUserID:                 invite.FromUserID,
+				RequiresKey:                invite.RequiresKey,
+				InitiatorAllowsUnencrypted: invite.InitiatorAllowsUnencrypted,
+				OnAccept: func(channelID uint64, allowUnencrypted bool) tea.Cmd {
+					return m.sendAllowUnencrypted(channelID, false)
+				},
+				OnDecline: func(channelID uint64) tea.Cmd {
+					return nil
+				},
+				OnSetupEncryption: func(channelID uint64) tea.Cmd {
+					return nil
+				},
+			})
+			m.modalStack.Push(dmModal)
+			return m, nil
+
+		case ChannelListItemChannel:
 			channel := item.Channel
 			// Check if channel has subchannels
 			if channel.HasSubchannels && channel.SubchannelCount > 0 {
@@ -537,7 +588,8 @@ func (m Model) handleChannelListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.sendSubscribeChannel(selectedChannel.ID),
 				)
 			}
-		} else {
+
+		case ChannelListItemSubchannel:
 			// Subchannel selected - navigate to it
 			// For now, treat subchannel as a channel (they share the same ID space)
 			subchannelID := item.Subchannel.ID
@@ -568,7 +620,7 @@ func (m Model) handleChannelListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "s":
 		// Create subchannel - only works when cursor is on a channel (not subchannel)
 		item := m.getChannelListItemAtCursor()
-		if item != nil && item.IsChannel && item.Channel != nil {
+		if item != nil && item.Type == ChannelListItemChannel && item.Channel != nil {
 			channel := item.Channel
 			// Show create subchannel modal
 			m.modalStack.Push(modal.NewCreateSubchannelModal(
@@ -949,6 +1001,15 @@ func (m Model) handleServerFrame(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 		return m.handleServerPresence(frame)
 	case protocol.TypeUnreadCounts:
 		return m.handleUnreadCounts(frame)
+	// DM responses
+	case protocol.TypeKeyRequired:
+		return m.handleKeyRequired(frame)
+	case protocol.TypeDMReady:
+		return m.handleDMReady(frame)
+	case protocol.TypeDMPending:
+		return m.handleDMPending(frame)
+	case protocol.TypeDMRequest:
+		return m.handleDMRequest(frame)
 	}
 
 	// Continue listening
@@ -3089,6 +3150,50 @@ func (m Model) sendListUsers(includeOffline bool) tea.Cmd {
 	}
 }
 
+// DM send commands
+
+func (m Model) sendStartDM(targetType uint8, targetUserID uint64, targetNickname string, allowUnencrypted bool) tea.Cmd {
+	return func() tea.Msg {
+		msg := &protocol.StartDMMessage{
+			TargetType:       targetType,
+			TargetUserID:     targetUserID,
+			TargetNickname:   targetNickname,
+			AllowUnencrypted: allowUnencrypted,
+		}
+		if err := m.conn.SendMessage(protocol.TypeStartDM, msg); err != nil {
+			return ErrorMsg{Err: err}
+		}
+		return nil
+	}
+}
+
+func (m Model) sendProvidePublicKey(keyType uint8, publicKey [32]byte, label string) tea.Cmd {
+	return func() tea.Msg {
+		msg := &protocol.ProvidePublicKeyMessage{
+			KeyType:   keyType,
+			PublicKey: publicKey,
+			Label:     label,
+		}
+		if err := m.conn.SendMessage(protocol.TypeProvidePublicKey, msg); err != nil {
+			return ErrorMsg{Err: err}
+		}
+		return nil
+	}
+}
+
+func (m Model) sendAllowUnencrypted(dmChannelID uint64, permanent bool) tea.Cmd {
+	return func() tea.Msg {
+		msg := &protocol.AllowUnencryptedMessage{
+			DMChannelID: dmChannelID,
+			Permanent:   permanent,
+		}
+		if err := m.conn.SendMessage(protocol.TypeAllowUnencrypted, msg); err != nil {
+			return ErrorMsg{Err: err}
+		}
+		return nil
+	}
+}
+
 // Admin response handlers
 
 func (m Model) handleUserBanned(frame *protocol.Frame) (tea.Model, tea.Cmd) {
@@ -3390,6 +3495,239 @@ func (m Model) handleUserDeleted(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	}
 
 	return m, tea.Batch(cmds...)
+}
+
+// DM response handlers
+
+func (m Model) handleKeyRequired(frame *protocol.Frame) (tea.Model, tea.Cmd) {
+	msg := &protocol.KeyRequiredMessage{}
+	if err := msg.Decode(frame.Payload); err != nil {
+		m.errorMessage = fmt.Sprintf("Failed to decode KEY_REQUIRED: %v", err)
+		return m, listenForServerFrames(m.conn, m.connGeneration)
+	}
+
+	if m.logger != nil {
+		m.logger.Printf("[DM] KEY_REQUIRED received: %s (channel: %v)", msg.Reason, msg.DMChannelID)
+	}
+
+	// Server is asking us to provide an encryption key
+	// Show the encryption setup modal
+	m.showEncryptionSetupModal(msg.DMChannelID, msg.Reason)
+
+	return m, listenForServerFrames(m.conn, m.connGeneration)
+}
+
+func (m Model) handleDMReady(frame *protocol.Frame) (tea.Model, tea.Cmd) {
+	msg := &protocol.DMReadyMessage{}
+	if err := msg.Decode(frame.Payload); err != nil {
+		m.errorMessage = fmt.Sprintf("Failed to decode DM_READY: %v", err)
+		return m, listenForServerFrames(m.conn, m.connGeneration)
+	}
+
+	if m.logger != nil {
+		m.logger.Printf("[DM] DM_READY: channel=%d, other=%s, encrypted=%v",
+			msg.ChannelID, msg.OtherNickname, msg.IsEncrypted)
+	}
+
+	// Add the DM channel to our list
+	dmChannel := DMChannel{
+		ChannelID:     msg.ChannelID,
+		OtherUserID:   msg.OtherUserID,
+		OtherNickname: msg.OtherNickname,
+		IsEncrypted:   msg.IsEncrypted,
+		UnreadCount:   0,
+	}
+
+	if msg.IsEncrypted {
+		dmChannel.OtherPubKey = msg.OtherPublicKey[:]
+		// TODO: Derive channel key using crypto package
+	}
+
+	// Check if this DM already exists, update if so
+	found := false
+	for i, existing := range m.dmChannels {
+		if existing.ChannelID == msg.ChannelID {
+			m.dmChannels[i] = dmChannel
+			found = true
+			break
+		}
+	}
+	if !found {
+		m.dmChannels = append(m.dmChannels, dmChannel)
+	}
+
+	// Remove any pending invite for this channel
+	for i, invite := range m.pendingDMInvites {
+		if invite.ChannelID == msg.ChannelID {
+			m.pendingDMInvites = append(m.pendingDMInvites[:i], m.pendingDMInvites[i+1:]...)
+			break
+		}
+	}
+
+	m.statusMessage = fmt.Sprintf("DM with %s is ready", msg.OtherNickname)
+
+	return m, listenForServerFrames(m.conn, m.connGeneration)
+}
+
+func (m Model) handleDMPending(frame *protocol.Frame) (tea.Model, tea.Cmd) {
+	msg := &protocol.DMPendingMessage{}
+	if err := msg.Decode(frame.Payload); err != nil {
+		m.errorMessage = fmt.Sprintf("Failed to decode DM_PENDING: %v", err)
+		return m, listenForServerFrames(m.conn, m.connGeneration)
+	}
+
+	if m.logger != nil {
+		m.logger.Printf("[DM] DM_PENDING: channel=%d, waiting for %s: %s",
+			msg.DMChannelID, msg.WaitingForNickname, msg.Reason)
+	}
+
+	// Show status that we're waiting for the other user
+	m.statusMessage = fmt.Sprintf("Waiting for %s: %s", msg.WaitingForNickname, msg.Reason)
+
+	return m, listenForServerFrames(m.conn, m.connGeneration)
+}
+
+func (m Model) handleDMRequest(frame *protocol.Frame) (tea.Model, tea.Cmd) {
+	msg := &protocol.DMRequestMessage{}
+	if err := msg.Decode(frame.Payload); err != nil {
+		m.errorMessage = fmt.Sprintf("Failed to decode DM_REQUEST: %v", err)
+		return m, listenForServerFrames(m.conn, m.connGeneration)
+	}
+
+	if m.logger != nil {
+		m.logger.Printf("[DM] DM_REQUEST: channel=%d, from=%s, requiresKey=%v, allowsUnencrypted=%v",
+			msg.DMChannelID, msg.FromNickname, msg.RequiresKey, msg.InitiatorAllowsUnencrypted)
+	}
+
+	// Add to pending invites
+	invite := DMInvite{
+		ChannelID:                  msg.DMChannelID,
+		FromUserID:                 msg.FromUserID,
+		FromNickname:               msg.FromNickname,
+		RequiresKey:                msg.RequiresKey,
+		InitiatorAllowsUnencrypted: msg.InitiatorAllowsUnencrypted,
+	}
+
+	// Check if invite already exists
+	found := false
+	for i, existing := range m.pendingDMInvites {
+		if existing.ChannelID == msg.DMChannelID {
+			m.pendingDMInvites[i] = invite
+			found = true
+			break
+		}
+	}
+	if !found {
+		m.pendingDMInvites = append(m.pendingDMInvites, invite)
+	}
+
+	// Show the DM request modal
+	dmModal := modal.NewDMRequestModal(modal.DMRequestModalConfig{
+		ChannelID:                  msg.DMChannelID,
+		FromNickname:               msg.FromNickname,
+		FromUserID:                 msg.FromUserID,
+		RequiresKey:                msg.RequiresKey,
+		InitiatorAllowsUnencrypted: msg.InitiatorAllowsUnencrypted,
+		OnAccept: func(channelID uint64, allowUnencrypted bool) tea.Cmd {
+			if allowUnencrypted {
+				return m.sendAllowUnencrypted(channelID, false)
+			}
+			// If not allowing unencrypted, we need to provide a key
+			// For now, just allow unencrypted as fallback
+			return m.sendAllowUnencrypted(channelID, false)
+		},
+		OnDecline: func(channelID uint64) tea.Cmd {
+			// Remove from pending invites
+			// Note: The actual decline is handled by just closing the modal
+			// The invite will expire on server side
+			return nil
+		},
+		OnSetupEncryption: func(channelID uint64) tea.Cmd {
+			// TODO: Show encryption setup modal
+			return nil
+		},
+	})
+	m.modalStack.Push(dmModal)
+
+	return m, listenForServerFrames(m.conn, m.connGeneration)
+}
+
+// showEncryptionSetupModal displays the modal for setting up encryption
+func (m *Model) showEncryptionSetupModal(dmChannelID *uint64, reason string) {
+	// Check if user has SSH key (authenticated via SSH)
+	hasSSHKey := m.userID != nil && m.authState == AuthStateAuthenticated
+
+	// Check if we already have an encryption key
+	hasExistingKey := m.encryptionKeyPub != nil
+
+	encModal := modal.NewEncryptionSetupModal(modal.EncryptionSetupConfig{
+		DMChannelID:    dmChannelID,
+		Reason:         reason,
+		HasSSHKey:      hasSSHKey,
+		HasExistingKey: hasExistingKey,
+		CanSkip:        true, // For now, always allow skipping
+		OnGenerate: func() tea.Cmd {
+			return m.generateAndSendEncryptionKey(dmChannelID)
+		},
+		OnUseSSH: func() tea.Cmd {
+			return m.deriveAndSendEncryptionKeyFromSSH(dmChannelID)
+		},
+		OnSkip: func() tea.Cmd {
+			if dmChannelID != nil {
+				return m.sendAllowUnencrypted(*dmChannelID, false)
+			}
+			return nil
+		},
+		OnCancel: func() tea.Cmd {
+			return nil
+		},
+	})
+	m.modalStack.Push(encModal)
+}
+
+// generateAndSendEncryptionKey generates a new X25519 key pair and sends the public key to the server
+func (m *Model) generateAndSendEncryptionKey(dmChannelID *uint64) tea.Cmd {
+	return func() tea.Msg {
+		// Generate new key pair
+		kp, err := crypto.GenerateX25519KeyPair()
+		if err != nil {
+			return ErrorMsg{Err: fmt.Errorf("failed to generate encryption key: %w", err)}
+		}
+
+		// Store the public key locally (we'll need it for reference)
+		// Note: The model will be updated when this command returns
+		// For now, we just send the key to the server
+
+		msg := &protocol.ProvidePublicKeyMessage{
+			KeyType:   protocol.KeyTypeGenerated,
+			PublicKey: kp.PublicKey,
+			Label:     "generated",
+		}
+		if err := m.conn.SendMessage(protocol.TypeProvidePublicKey, msg); err != nil {
+			return ErrorMsg{Err: err}
+		}
+
+		return EncryptionKeyGeneratedMsg{
+			PublicKey:  kp.PublicKey,
+			PrivateKey: kp.PrivateKey,
+		}
+	}
+}
+
+// deriveAndSendEncryptionKeyFromSSH derives an X25519 key from the user's SSH key
+func (m *Model) deriveAndSendEncryptionKeyFromSSH(dmChannelID *uint64) tea.Cmd {
+	return func() tea.Msg {
+		// TODO: Access SSH private key and derive X25519 key
+		// This requires access to the SSH agent or key file
+		// For now, fall back to generating a new key
+		return ErrorMsg{Err: fmt.Errorf("SSH key derivation not yet implemented")}
+	}
+}
+
+// EncryptionKeyGeneratedMsg is sent when a new encryption key is generated
+type EncryptionKeyGeneratedMsg struct {
+	PublicKey  [32]byte
+	PrivateKey [32]byte
 }
 
 // shouldNotifyForMessage checks if we should send a desktop notification for this message

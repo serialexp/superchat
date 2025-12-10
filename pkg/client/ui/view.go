@@ -633,8 +633,6 @@ func (m Model) renderFooter(shortcuts string) string {
 
 // buildChannelPaneContentString builds the channel list content without styling
 func (m Model) buildChannelPaneContentString(availableWidth int) string {
-	title := ChannelTitleStyle.Render("Channels")
-
 	// Format server address, hiding default port (6465)
 	addr := m.conn.GetAddress()
 	if idx := strings.LastIndex(addr, ":6465"); idx != -1 {
@@ -654,6 +652,51 @@ func (m Model) buildChannelPaneContentString(availableWidth int) string {
 
 		// Track position in virtual flat list for cursor
 		flatIndex := 0
+
+		// === Active DMs at the top ===
+		if len(m.dmChannels) > 0 {
+			dmTitle := ChannelTitleStyle.Render("Direct Messages")
+			items = append(items, dmTitle)
+
+			for _, dm := range m.dmChannels {
+				// Use lock icon for encrypted, open envelope for unencrypted
+				var prefix string
+				if dm.IsEncrypted {
+					prefix = "🔒"
+				} else {
+					prefix = "✉"
+				}
+				base := prefix + " " + dm.OtherNickname
+
+				var label string
+				if flatIndex == m.channelCursor {
+					label = SelectedItemStyle.Render("▶ " + base)
+				} else {
+					label = UnselectedItemStyle.Render("  " + base)
+				}
+
+				// Show unread count if any
+				if dm.UnreadCount > 0 {
+					countStr := formatCount(dm.UnreadCount)
+					labelWidth := lipgloss.Width(label)
+					rightWidth := lipgloss.Width(countStr)
+					paddingWidth := contentWidth - labelWidth - rightWidth - 1
+					if paddingWidth < 1 {
+						paddingWidth = 1
+					}
+					padding := strings.Repeat(" ", paddingWidth)
+					label = label + padding + MutedTextStyle.Render(countStr)
+				}
+
+				items = append(items, label)
+				flatIndex++
+			}
+			items = append(items, "") // Spacing after DMs
+		}
+
+		// === Channels section ===
+		title := ChannelTitleStyle.Render("Channels")
+		items = append(items, title)
 
 		for _, channel := range m.channels {
 			isExpanded := m.expandedChannelID != nil && *m.expandedChannelID == channel.ID
@@ -746,14 +789,32 @@ func (m Model) buildChannelPaneContentString(availableWidth int) string {
 			}
 		}
 
-		if len(items) == 0 {
+		if len(m.channels) == 0 && len(m.dmChannels) == 0 {
 			items = append(items, MutedTextStyle.Render("  (no channels)"))
+		}
+
+		// === Pending DM invites at the bottom ===
+		if len(m.pendingDMInvites) > 0 {
+			items = append(items, "") // Spacing before pending
+			pendingTitle := MutedTextStyle.Bold(true).Render("Pending Requests")
+			items = append(items, pendingTitle)
+
+			for _, invite := range m.pendingDMInvites {
+				base := "📩 " + invite.FromNickname
+				var label string
+				if flatIndex == m.channelCursor {
+					label = SelectedItemStyle.Render("▶ " + base)
+				} else {
+					label = UnselectedItemStyle.Render("  " + base)
+				}
+				items = append(items, label)
+				flatIndex++
+			}
 		}
 	}
 
 	return lipgloss.JoinVertical(
 		lipgloss.Left,
-		title,
 		serverAddr,
 		strings.Join(items, "\n"),
 	)

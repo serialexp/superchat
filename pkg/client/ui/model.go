@@ -62,6 +62,25 @@ type presenceEntry struct {
 	UserFlags    protocol.UserFlags
 }
 
+// DMChannel represents an active DM channel
+type DMChannel struct {
+	ChannelID     uint64
+	OtherUserID   *uint64 // nil if other party is anonymous
+	OtherNickname string
+	IsEncrypted   bool
+	OtherPubKey   []byte // Other party's X25519 public key (for encrypted DMs)
+	UnreadCount   uint32
+}
+
+// DMInvite represents a pending DM request
+type DMInvite struct {
+	ChannelID               uint64
+	FromUserID              *uint64 // nil if initiator is anonymous
+	FromNickname            string
+	RequiresKey             bool // True if we need to set up encryption key
+	InitiatorAllowsUnencrypted bool // True if we can accept unencrypted
+}
+
 // Model represents the application state
 type Model struct {
 	// Connection and state
@@ -188,6 +207,14 @@ type Model struct {
 	// Bandwidth optimization
 	threadRepliesCache     map[uint64][]protocol.Message // Cached thread replies
 	threadHighestMessageID map[uint64]uint64             // Highest message ID seen per thread
+
+	// Direct Messages (V3)
+	dmChannels       []DMChannel          // Active DM channels
+	pendingDMInvites []DMInvite           // Incoming DM requests awaiting response
+	dmChannelKeys    map[uint64][]byte    // channelID -> derived AES key for encryption
+	encryptionKeyPub []byte               // Our X25519 public key (nil if not set up)
+	dmCursor         int                  // Cursor position in DM list
+	showDMList       bool                 // True when viewing DM list instead of channels
 }
 
 // NewModel creates a new application model
@@ -262,6 +289,7 @@ func NewModel(conn client.ConnectionInterface, state client.StateInterface, curr
 		channelRoster:          make(map[uint64]map[uint64]presenceEntry),
 		serverRoster:           make(map[uint64]presenceEntry),
 		unreadCounts:           make(map[uint64]uint32),
+		dmChannelKeys:          make(map[uint64][]byte),
 	}
 
 	// Initialize notification icon (write to data directory if needed)
@@ -529,6 +557,37 @@ func (m *Model) registerCommands() {
 			return model, nil
 		}).
 		Priority(40).
+		Build())
+
+	// Start DM with message author
+	m.commands.Register(commands.NewCommand().
+		Keys("d").
+		Name("DM Author").
+		Help("Start a DM with the message author").
+		InViews(int(ViewThreadView)).
+		When(func(i interface{}) bool {
+			model := i.(*Model)
+			msg, ok := model.selectedMessage()
+			if !ok {
+				return false
+			}
+			// Can't DM yourself
+			if model.isOwnMessage(*msg) {
+				return false
+			}
+			// Need to have a nickname set
+			if model.nickname == "" {
+				return false
+			}
+			// Can DM if author has a user ID (registered) or nickname (anonymous)
+			return msg.AuthorNickname != ""
+		}).
+		Do(func(i interface{}) (interface{}, tea.Cmd) {
+			model := i.(*Model)
+			msg, _ := model.selectedMessage()
+			return model.startDMWithUser(msg.AuthorUserID, msg.AuthorNickname)
+		}).
+		Priority(45). // Lower priority than delete (40)
 		Build())
 
 	// Back to thread list
@@ -1670,6 +1729,29 @@ func (m *Model) clearActiveChannel() {
 	m.activeChannelID = 0
 }
 
+// startDMWithUser initiates a DM with the specified user
+func (m *Model) startDMWithUser(userID *uint64, nickname string) (*Model, tea.Cmd) {
+	// Determine target type and send START_DM
+	var targetType uint8
+	var targetUserID uint64
+
+	if userID != nil {
+		// Target by user ID (registered user)
+		targetType = protocol.DMTargetByUserID
+		targetUserID = *userID
+	} else {
+		// Target by nickname (anonymous user)
+		targetType = protocol.DMTargetByNickname
+	}
+
+	m.statusMessage = fmt.Sprintf("Starting DM with %s...", nickname)
+
+	// For now, allow unencrypted DMs (TODO: check if we have encryption key)
+	allowUnencrypted := true
+
+	return m, m.sendStartDM(targetType, targetUserID, nickname, allowUnencrypted)
+}
+
 // showComposeWithWarning shows the compose modal, potentially with registration warning first
 func (m *Model) showComposeWithWarning(mode modal.ComposeMode, initialContent string) {
 	if m.shouldShowRegistrationWarning() {
@@ -1684,17 +1766,37 @@ func (m *Model) showComposeWithWarning(mode modal.ComposeMode, initialContent st
 	}
 }
 
-// ChannelListItem represents an item in the channel list (channel or subchannel)
+// ChannelListItemType represents the type of item in the channel list
+type ChannelListItemType int
+
+const (
+	ChannelListItemChannel ChannelListItemType = iota
+	ChannelListItemSubchannel
+	ChannelListItemDM
+	ChannelListItemPendingDM
+)
+
+// ChannelListItem represents an item in the channel list (channel, subchannel, DM, or pending invite)
 type ChannelListItem struct {
-	IsChannel    bool
+	Type         ChannelListItemType
 	ChannelIndex int                      // Index into m.channels (for channels)
 	Channel      *protocol.Channel        // The channel (for channels or parent for subchannels)
 	Subchannel   *protocol.SubchannelInfo // The subchannel (nil for channels)
+	DM           *DMChannel               // The DM channel (for DMs)
+	DMIndex      int                      // Index into m.dmChannels
+	PendingDM    *DMInvite                // The pending DM invite
+	PendingIndex int                      // Index into m.pendingDMInvites
+}
+
+// IsChannel returns true if this is a regular channel
+func (i *ChannelListItem) IsChannel() bool {
+	return i.Type == ChannelListItemChannel
 }
 
 // getVisibleChannelListItemCount returns the total number of visible items in the channel list
 func (m *Model) getVisibleChannelListItemCount() int {
-	count := len(m.channels)
+	count := len(m.dmChannels) // DMs at the top
+	count += len(m.channels)   // Regular channels
 	if m.expandedChannelID != nil {
 		// Add subchannels for the expanded channel
 		count += len(m.subchannels)
@@ -1702,17 +1804,33 @@ func (m *Model) getVisibleChannelListItemCount() int {
 			count++ // Loading indicator
 		}
 	}
+	count += len(m.pendingDMInvites) // Pending invites at the bottom
 	return count
 }
 
 // getChannelListItemAtCursor returns the item at the current cursor position
 func (m *Model) getChannelListItemAtCursor() *ChannelListItem {
 	flatIndex := 0
+
+	// First: DM channels at the top
+	for i := range m.dmChannels {
+		if flatIndex == m.channelCursor {
+			dm := m.dmChannels[i]
+			return &ChannelListItem{
+				Type:    ChannelListItemDM,
+				DM:      &dm,
+				DMIndex: i,
+			}
+		}
+		flatIndex++
+	}
+
+	// Second: Regular channels
 	for i, channel := range m.channels {
 		if flatIndex == m.channelCursor {
 			ch := channel // Copy to avoid referencing loop variable
 			return &ChannelListItem{
-				IsChannel:    true,
+				Type:         ChannelListItemChannel,
 				ChannelIndex: i,
 				Channel:      &ch,
 				Subchannel:   nil,
@@ -1727,7 +1845,7 @@ func (m *Model) getChannelListItemAtCursor() *ChannelListItem {
 					// Cursor on loading indicator - treat as on channel
 					ch := channel
 					return &ChannelListItem{
-						IsChannel:    true,
+						Type:         ChannelListItemChannel,
 						ChannelIndex: i,
 						Channel:      &ch,
 						Subchannel:   nil,
@@ -1740,7 +1858,7 @@ func (m *Model) getChannelListItemAtCursor() *ChannelListItem {
 						ch := channel
 						sub := m.subchannels[j]
 						return &ChannelListItem{
-							IsChannel:    false,
+							Type:         ChannelListItemSubchannel,
 							ChannelIndex: i,
 							Channel:      &ch,
 							Subchannel:   &sub,
@@ -1751,6 +1869,20 @@ func (m *Model) getChannelListItemAtCursor() *ChannelListItem {
 			}
 		}
 	}
+
+	// Third: Pending DM invites at the bottom
+	for i := range m.pendingDMInvites {
+		if flatIndex == m.channelCursor {
+			invite := m.pendingDMInvites[i]
+			return &ChannelListItem{
+				Type:         ChannelListItemPendingDM,
+				PendingDM:    &invite,
+				PendingIndex: i,
+			}
+		}
+		flatIndex++
+	}
+
 	return nil
 }
 
