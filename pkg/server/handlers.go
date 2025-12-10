@@ -459,15 +459,20 @@ func (s *Server) handleListChannels(sess *Session, frame *protocol.Frame) error 
 		channelSub := ChannelSubscription{ChannelID: uint64(dbCh.ID)}
 		userCount := uint32(len(s.sessions.GetChannelSubscribers(channelSub)))
 
+		// Get subchannel count for V3
+		subchannelCount, _ := s.db.GetSubchannelCount(dbCh.ID)
+
 		// Convert to protocol format
 		ch := protocol.Channel{
-			ID:             uint64(dbCh.ID),
-			Name:           dbCh.Name,
-			Description:    safeDeref(dbCh.Description, ""),
-			UserCount:      userCount,
-			IsOperator:     false,
-			Type:           dbCh.ChannelType,
-			RetentionHours: dbCh.MessageRetentionHours,
+			ID:              uint64(dbCh.ID),
+			Name:            dbCh.Name,
+			Description:     safeDeref(dbCh.Description, ""),
+			UserCount:       userCount,
+			IsOperator:      false,
+			Type:            dbCh.ChannelType,
+			RetentionHours:  dbCh.MessageRetentionHours,
+			HasSubchannels:  subchannelCount > 0,
+			SubchannelCount: uint16(subchannelCount),
 		}
 		channelList = append(channelList, ch)
 
@@ -692,6 +697,184 @@ func (s *Server) handleCreateChannel(sess *Session, frame *protocol.Frame) error
 	s.broadcastChannelCreated(createdChannel, sess.ID)
 
 	return nil
+}
+
+// handleCreateSubchannel handles CREATE_SUBCHANNEL message
+func (s *Server) handleCreateSubchannel(sess *Session, frame *protocol.Frame) error {
+	msg := &protocol.CreateSubchannelMessage{}
+	if err := msg.Decode(frame.Payload); err != nil {
+		return s.sendMessage(sess, protocol.TypeSubchannelCreated, &protocol.SubchannelCreatedMessage{
+			Success: false,
+			Message: "Invalid request format",
+		})
+	}
+
+	// V3 feature: Only registered users can create subchannels
+	sess.mu.RLock()
+	userID := sess.UserID
+	sess.mu.RUnlock()
+
+	if userID == nil {
+		return s.sendMessage(sess, protocol.TypeSubchannelCreated, &protocol.SubchannelCreatedMessage{
+			Success: false,
+			Message: "Only registered users can create subchannels. Please register or log in.",
+		})
+	}
+
+	// Verify parent channel exists
+	parentChannel, err := s.db.GetChannel(int64(msg.ChannelID))
+	if err != nil {
+		return s.sendMessage(sess, protocol.TypeSubchannelCreated, &protocol.SubchannelCreatedMessage{
+			Success: false,
+			Message: "Parent channel not found",
+		})
+	}
+
+	// Check permission: must be channel owner or server admin
+	isOwner := parentChannel.CreatedBy != nil && *parentChannel.CreatedBy == *userID
+	isAdmin := s.isAdmin(sess)
+	if !isOwner && !isAdmin {
+		return s.sendMessage(sess, protocol.TypeSubchannelCreated, &protocol.SubchannelCreatedMessage{
+			Success: false,
+			Message: "Only the channel owner or admins can create subchannels",
+		})
+	}
+
+	// Don't allow creating sub-subchannels (only one level of nesting)
+	if parentChannel.ParentID != nil {
+		return s.sendMessage(sess, protocol.TypeSubchannelCreated, &protocol.SubchannelCreatedMessage{
+			Success: false,
+			Message: "Cannot create subchannels within subchannels (only one level of nesting allowed)",
+		})
+	}
+
+	// Validate subchannel name (must be URL-friendly)
+	if len(msg.Name) < 3 || len(msg.Name) > 50 {
+		return s.sendMessage(sess, protocol.TypeSubchannelCreated, &protocol.SubchannelCreatedMessage{
+			Success: false,
+			Message: "Subchannel name must be 3-50 characters",
+		})
+	}
+
+	// Validate description (max 500 chars)
+	if len(msg.Description) > 500 {
+		return s.sendMessage(sess, protocol.TypeSubchannelCreated, &protocol.SubchannelCreatedMessage{
+			Success: false,
+			Message: "Description must be at most 500 characters",
+		})
+	}
+
+	// Validate channel type (0=chat, 1=forum)
+	if msg.Type != 0 && msg.Type != 1 {
+		return s.sendMessage(sess, protocol.TypeSubchannelCreated, &protocol.SubchannelCreatedMessage{
+			Success: false,
+			Message: "Invalid channel type (must be 0=chat or 1=forum)",
+		})
+	}
+
+	// Validate retention hours (1 hour to 1 year)
+	if msg.RetentionHours < 1 || msg.RetentionHours > 8760 {
+		return s.sendMessage(sess, protocol.TypeSubchannelCreated, &protocol.SubchannelCreatedMessage{
+			Success: false,
+			Message: "Retention hours must be between 1 and 8760 (1 year)",
+		})
+	}
+
+	// Create subchannel display name (prefix with parent name)
+	displayName := fmt.Sprintf("%s/%s", parentChannel.DisplayName, msg.Name)
+
+	// Create subchannel in database
+	var descPtr *string
+	if msg.Description != "" {
+		descPtr = &msg.Description
+	}
+	subchannelID, err := s.db.CreateSubchannel(int64(msg.ChannelID), msg.Name, displayName, descPtr, msg.Type, msg.RetentionHours, userID)
+	if err != nil {
+		// Check if it's a duplicate name error
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") || strings.Contains(err.Error(), "already exists") {
+			return s.sendMessage(sess, protocol.TypeSubchannelCreated, &protocol.SubchannelCreatedMessage{
+				Success: false,
+				Message: "Subchannel name already exists in this channel",
+			})
+		}
+		return s.dbError(sess, "CreateSubchannel", err)
+	}
+
+	// Build SUBCHANNEL_CREATED message (hybrid response + broadcast)
+	subchannelCreatedMsg := &protocol.SubchannelCreatedMessage{
+		Success:        true,
+		ChannelID:      msg.ChannelID,
+		SubchannelID:   uint64(subchannelID),
+		Name:           msg.Name,
+		Description:    msg.Description,
+		Type:           msg.Type,
+		RetentionHours: msg.RetentionHours,
+		Message:        fmt.Sprintf("Subchannel '%s' created successfully", msg.Name),
+	}
+
+	// Send to creator as confirmation
+	if err := s.sendMessage(sess, protocol.TypeSubchannelCreated, subchannelCreatedMsg); err != nil {
+		return err
+	}
+
+	// Broadcast to all OTHER connected users (not the creator again)
+	s.broadcastSubchannelCreated(subchannelCreatedMsg, sess.ID)
+
+	return nil
+}
+
+// handleGetSubchannels handles GET_SUBCHANNELS message
+func (s *Server) handleGetSubchannels(sess *Session, frame *protocol.Frame) error {
+	msg := &protocol.GetSubchannelsMessage{}
+	if err := msg.Decode(frame.Payload); err != nil {
+		return s.sendError(sess, protocol.ErrCodeInvalidFormat, "Invalid request format")
+	}
+
+	// Verify parent channel exists
+	_, err := s.db.GetChannel(int64(msg.ChannelID))
+	if err != nil {
+		return s.sendError(sess, protocol.ErrCodeChannelNotFound, "Channel not found")
+	}
+
+	// Get subchannels
+	subchannels, err := s.db.GetSubchannels(int64(msg.ChannelID))
+	if err != nil {
+		return s.dbError(sess, "GetSubchannels", err)
+	}
+
+	// Build response
+	subchannelInfos := make([]protocol.SubchannelInfo, len(subchannels))
+	for i, sub := range subchannels {
+		desc := ""
+		if sub.Description != nil {
+			desc = *sub.Description
+		}
+		subchannelInfos[i] = protocol.SubchannelInfo{
+			ID:             uint64(sub.ID),
+			Name:           sub.Name,
+			Description:    desc,
+			Type:           sub.ChannelType,
+			RetentionHours: sub.MessageRetentionHours,
+		}
+	}
+
+	return s.sendMessage(sess, protocol.TypeSubchannelList, &protocol.SubchannelListMessage{
+		ChannelID:   msg.ChannelID,
+		Subchannels: subchannelInfos,
+	})
+}
+
+// broadcastSubchannelCreated broadcasts a subchannel creation to all connected users
+func (s *Server) broadcastSubchannelCreated(msg *protocol.SubchannelCreatedMessage, excludeSessionID uint64) {
+	sessions := s.sessions.GetAllSessions()
+	for _, target := range sessions {
+		if target.ID == excludeSessionID {
+			continue
+		}
+		if err := s.sendMessage(target, protocol.TypeSubchannelCreated, msg); err != nil {
+			log.Printf("Failed to broadcast SUBCHANNEL_CREATED to session %d: %v", target.ID, err)
+		}
+	}
 }
 
 // handleListMessages handles LIST_MESSAGES message
@@ -2969,4 +3152,434 @@ func (s *Server) handleUpdateReadState(sess *Session, frame *protocol.Frame) err
 
 	// Silent success (no response message defined for UPDATE_READ_STATE)
 	return nil
+}
+
+// ============================================================================
+// V3 Direct Message (DM) Handlers
+// ============================================================================
+
+// handleStartDM initiates a DM conversation with another user
+func (s *Server) handleStartDM(sess *Session, frame *protocol.Frame) error {
+	msg := &protocol.StartDMMessage{}
+	if err := msg.Decode(frame.Payload); err != nil {
+		return s.sendError(sess, protocol.ErrCodeInvalidFormat, "Invalid START_DM format")
+	}
+
+	sess.mu.RLock()
+	initiatorUserID := sess.UserID
+	initiatorNickname := sess.Nickname
+	sess.mu.RUnlock()
+
+	// Find target user
+	var targetUser *database.User
+	var targetSession *Session
+	var err error
+
+	switch msg.TargetType {
+	case protocol.DMTargetByUserID:
+		targetUser, err = s.db.GetUserByID(int64(msg.TargetUserID))
+		if err != nil {
+			return s.sendError(sess, protocol.ErrCodeNotFound, "User not found")
+		}
+	case protocol.DMTargetByNickname:
+		// First try registered user
+		targetUser, err = s.db.GetUserByNickname(msg.TargetNickname)
+		if err != nil {
+			// Try to find an online session with this nickname
+			for _, session := range s.sessions.GetAllSessions() {
+				session.mu.RLock()
+				if session.Nickname == msg.TargetNickname {
+					targetSession = session
+					session.mu.RUnlock()
+					break
+				}
+				session.mu.RUnlock()
+			}
+
+			if targetSession == nil {
+				return s.sendError(sess, protocol.ErrCodeNotFound, "User not found")
+			}
+		}
+	case protocol.DMTargetBySessionID:
+		// Find session by ID
+		allSessions := s.sessions.GetAllSessions()
+		for _, session := range allSessions {
+			if session.ID == msg.TargetUserID {
+				targetSession = session
+				break
+			}
+		}
+		if targetSession == nil {
+			return s.sendError(sess, protocol.ErrCodeNotFound, "Session not found")
+		}
+	default:
+		return s.sendError(sess, protocol.ErrCodeInvalidFormat, "Invalid target type")
+	}
+
+	// Get target user ID if we found a registered user
+	var targetUserID *int64
+	var targetNickname string
+	if targetUser != nil {
+		targetUserID = &targetUser.ID
+		targetNickname = targetUser.Nickname
+	} else if targetSession != nil {
+		targetSession.mu.RLock()
+		targetUserID = targetSession.UserID
+		targetNickname = targetSession.Nickname
+		targetSession.mu.RUnlock()
+	}
+
+	// Check if DM already exists between these users
+	if initiatorUserID != nil && targetUserID != nil {
+		existingDM, err := s.db.GetDMChannelBetweenUsers(*initiatorUserID, *targetUserID)
+		if err == nil && existingDM != nil {
+			// DM already exists, send DM_READY with existing channel
+			return s.sendExistingDMReady(sess, existingDM, targetUser)
+		}
+	}
+
+	// Check encryption keys
+	var initiatorHasKey, targetHasKey bool
+	var initiatorPubKey, targetPubKey []byte
+
+	if initiatorUserID != nil {
+		initiatorPubKey, _ = s.db.GetUserEncryptionKey(*initiatorUserID)
+		initiatorHasKey = len(initiatorPubKey) == 32
+	}
+	if targetUserID != nil {
+		targetPubKey, _ = s.db.GetUserEncryptionKey(*targetUserID)
+		targetHasKey = len(targetPubKey) == 32
+	}
+
+	// Determine if encryption is possible
+	canEncrypt := initiatorHasKey && targetHasKey
+
+	// If initiator doesn't have a key and doesn't allow unencrypted
+	if !initiatorHasKey && !msg.AllowUnencrypted {
+		return s.sendKeyRequired(sess, "You need to set up an encryption key before starting encrypted DMs", nil)
+	}
+
+	// If both have keys, create encrypted DM immediately
+	if canEncrypt && initiatorUserID != nil && targetUserID != nil {
+		channelID, err := s.db.CreateDMChannel(*initiatorUserID, *targetUserID, true)
+		if err != nil {
+			log.Printf("[ERROR] Failed to create DM channel: %v", err)
+			return s.sendError(sess, protocol.ErrCodeDatabaseError, "Failed to create DM channel")
+		}
+
+		// Send DM_READY to initiator
+		var targetPubKeyArr [32]byte
+		copy(targetPubKeyArr[:], targetPubKey)
+		initiatorReady := &protocol.DMReadyMessage{
+			ChannelID:      uint64(channelID),
+			OtherUserID:    toUint64Ptr(targetUserID),
+			OtherNickname:  targetNickname,
+			IsEncrypted:    true,
+			OtherPublicKey: targetPubKeyArr,
+		}
+		if err := s.sendMessage(sess, protocol.TypeDMReady, initiatorReady); err != nil {
+			return err
+		}
+
+		// Send DM_READY to target if online
+		if targetSession != nil || targetUserID != nil {
+			var initiatorPubKeyArr [32]byte
+			copy(initiatorPubKeyArr[:], initiatorPubKey)
+			targetReady := &protocol.DMReadyMessage{
+				ChannelID:      uint64(channelID),
+				OtherUserID:    toUint64Ptr(initiatorUserID),
+				OtherNickname:  initiatorNickname,
+				IsEncrypted:    true,
+				OtherPublicKey: initiatorPubKeyArr,
+			}
+			s.sendToUserOrSession(targetUserID, targetSession, protocol.TypeDMReady, targetReady)
+		}
+
+		return nil
+	}
+
+	// Need consent flow - create invite
+	if initiatorUserID == nil || targetUserID == nil {
+		// Anonymous DMs require both to be online
+		if targetSession == nil {
+			return s.sendError(sess, protocol.ErrCodeNotFound, "Target user must be online for anonymous DMs")
+		}
+	}
+
+	// Create DM invite (for unencrypted or key setup flow)
+	isEncrypted := canEncrypt
+	var inviteID int64
+	if initiatorUserID != nil && targetUserID != nil {
+		inviteID, err = s.db.CreateDMInvite(*initiatorUserID, *targetUserID, isEncrypted)
+		if err != nil {
+			log.Printf("[ERROR] Failed to create DM invite: %v", err)
+			return s.sendError(sess, protocol.ErrCodeDatabaseError, "Failed to create DM invite")
+		}
+	}
+
+	// Send DM_PENDING to initiator
+	pending := &protocol.DMPendingMessage{
+		DMChannelID:        uint64(inviteID),
+		WaitingForUserID:   toUint64Ptr(targetUserID),
+		WaitingForNickname: targetNickname,
+		Reason:             "Waiting for " + targetNickname + " to accept",
+	}
+	if err := s.sendMessage(sess, protocol.TypeDMPending, pending); err != nil {
+		return err
+	}
+
+	// Send DM_REQUEST to target
+	request := &protocol.DMRequestMessage{
+		DMChannelID:                uint64(inviteID),
+		FromUserID:                 toUint64Ptr(initiatorUserID),
+		FromNickname:               initiatorNickname,
+		RequiresKey:                !targetHasKey,
+		InitiatorAllowsUnencrypted: msg.AllowUnencrypted,
+	}
+	s.sendToUserOrSession(targetUserID, targetSession, protocol.TypeDMRequest, request)
+
+	return nil
+}
+
+// handleProvidePublicKey stores a user's encryption public key
+func (s *Server) handleProvidePublicKey(sess *Session, frame *protocol.Frame) error {
+	msg := &protocol.ProvidePublicKeyMessage{}
+	if err := msg.Decode(frame.Payload); err != nil {
+		return s.sendError(sess, protocol.ErrCodeInvalidFormat, "Invalid PROVIDE_PUBLIC_KEY format")
+	}
+
+	sess.mu.RLock()
+	userID := sess.UserID
+	sess.mu.RUnlock()
+
+	// Anonymous users can have ephemeral keys (session-only)
+	if userID == nil {
+		if msg.KeyType != protocol.KeyTypeEphemeral {
+			return s.sendError(sess, protocol.ErrCodePermissionDenied, "Anonymous users can only use ephemeral keys")
+		}
+		// Store in session (not database)
+		sess.mu.Lock()
+		sess.EncryptionPublicKey = msg.PublicKey[:]
+		sess.mu.Unlock()
+
+		// Check for any pending DM invites that were waiting for this key
+		// (Would need session-based invite tracking for anonymous users)
+		return nil
+	}
+
+	// Store key for registered user
+	if err := s.db.SetUserEncryptionKey(*userID, msg.PublicKey[:]); err != nil {
+		log.Printf("[ERROR] Failed to store encryption key: %v", err)
+		return s.sendError(sess, protocol.ErrCodeDatabaseError, "Failed to store encryption key")
+	}
+
+	// Check for pending DM invites where this user is the target
+	invites, err := s.db.GetPendingDMInvitesForUser(*userID)
+	if err != nil {
+		log.Printf("[WARN] Failed to get pending invites: %v", err)
+	}
+
+	// Process any pending invites that were waiting for this user's key
+	for _, invite := range invites {
+		s.processPendingInviteAfterKey(sess, invite)
+	}
+
+	return nil
+}
+
+// handleAllowUnencrypted accepts an unencrypted DM request
+func (s *Server) handleAllowUnencrypted(sess *Session, frame *protocol.Frame) error {
+	msg := &protocol.AllowUnencryptedMessage{}
+	if err := msg.Decode(frame.Payload); err != nil {
+		return s.sendError(sess, protocol.ErrCodeInvalidFormat, "Invalid ALLOW_UNENCRYPTED format")
+	}
+
+	// Get the invite
+	invite, err := s.db.GetDMInvite(int64(msg.DMChannelID))
+	if err != nil || invite == nil {
+		return s.sendError(sess, protocol.ErrCodeNotFound, "DM invite not found")
+	}
+
+	sess.mu.RLock()
+	userID := sess.UserID
+	sess.mu.RUnlock()
+
+	// Verify this user is the target of the invite
+	if userID == nil || *userID != invite.TargetUserID {
+		return s.sendError(sess, protocol.ErrCodePermissionDenied, "Not authorized for this invite")
+	}
+
+	// Create unencrypted DM channel
+	channelID, err := s.db.CreateDMChannel(invite.InitiatorUserID, invite.TargetUserID, false)
+	if err != nil {
+		log.Printf("[ERROR] Failed to create unencrypted DM: %v", err)
+		return s.sendError(sess, protocol.ErrCodeDatabaseError, "Failed to create DM")
+	}
+
+	// Delete the invite
+	s.db.DeleteDMInvite(invite.ID)
+
+	// Get user info
+	initiatorUser, _ := s.db.GetUserByID(invite.InitiatorUserID)
+	targetUser, _ := s.db.GetUserByID(invite.TargetUserID)
+
+	initiatorNickname := ""
+	targetNickname := ""
+	if initiatorUser != nil {
+		initiatorNickname = initiatorUser.Nickname
+	}
+	if targetUser != nil {
+		targetNickname = targetUser.Nickname
+	}
+
+	// Send DM_READY to target (this user)
+	targetReady := &protocol.DMReadyMessage{
+		ChannelID:     uint64(channelID),
+		OtherUserID:   toUint64Ptr(&invite.InitiatorUserID),
+		OtherNickname: initiatorNickname,
+		IsEncrypted:   false,
+	}
+	if err := s.sendMessage(sess, protocol.TypeDMReady, targetReady); err != nil {
+		return err
+	}
+
+	// Send DM_READY to initiator
+	initiatorReady := &protocol.DMReadyMessage{
+		ChannelID:     uint64(channelID),
+		OtherUserID:   toUint64Ptr(&invite.TargetUserID),
+		OtherNickname: targetNickname,
+		IsEncrypted:   false,
+	}
+	s.sendToUser(invite.InitiatorUserID, protocol.TypeDMReady, initiatorReady)
+
+	return nil
+}
+
+// Helper: send DM_READY for an existing DM channel
+func (s *Server) sendExistingDMReady(sess *Session, dm *database.Channel, otherUser *database.User) error {
+	sess.mu.RLock()
+	currentUserID := sess.UserID
+	sess.mu.RUnlock()
+
+	var otherPubKey [32]byte
+	isEncrypted := false
+
+	if otherUser != nil && currentUserID != nil {
+		// Get encryption keys if both users have them
+		currentKey, _ := s.db.GetUserEncryptionKey(*currentUserID)
+		otherKey, _ := s.db.GetUserEncryptionKey(otherUser.ID)
+		if len(currentKey) == 32 && len(otherKey) == 32 {
+			isEncrypted = true
+			copy(otherPubKey[:], otherKey)
+		}
+	}
+
+	var otherUserID *uint64
+	var otherNickname string
+	if otherUser != nil {
+		uid := uint64(otherUser.ID)
+		otherUserID = &uid
+		otherNickname = otherUser.Nickname
+	}
+
+	ready := &protocol.DMReadyMessage{
+		ChannelID:      uint64(dm.ID),
+		OtherUserID:    otherUserID,
+		OtherNickname:  otherNickname,
+		IsEncrypted:    isEncrypted,
+		OtherPublicKey: otherPubKey,
+	}
+	return s.sendMessage(sess, protocol.TypeDMReady, ready)
+}
+
+// Helper: send KEY_REQUIRED message
+func (s *Server) sendKeyRequired(sess *Session, reason string, channelID *uint64) error {
+	msg := &protocol.KeyRequiredMessage{
+		Reason:      reason,
+		DMChannelID: channelID,
+	}
+	return s.sendMessage(sess, protocol.TypeKeyRequired, msg)
+}
+
+// Helper: send message to a user by ID (find their session)
+func (s *Server) sendToUser(userID int64, msgType byte, msg protocol.ProtocolMessage) {
+	for _, session := range s.sessions.GetAllSessions() {
+		session.mu.RLock()
+		if session.UserID != nil && *session.UserID == userID {
+			session.mu.RUnlock()
+			s.sendMessage(session, msgType, msg)
+			return
+		}
+		session.mu.RUnlock()
+	}
+}
+
+// Helper: send message to user by ID or session
+func (s *Server) sendToUserOrSession(userID *int64, targetSession *Session, msgType byte, msg protocol.ProtocolMessage) {
+	if targetSession != nil {
+		s.sendMessage(targetSession, msgType, msg)
+		return
+	}
+	if userID != nil {
+		s.sendToUser(*userID, msgType, msg)
+	}
+}
+
+// Helper: convert *int64 to *uint64
+func toUint64Ptr(i *int64) *uint64 {
+	if i == nil {
+		return nil
+	}
+	u := uint64(*i)
+	return &u
+}
+
+// Helper: process pending invite after user provides key
+func (s *Server) processPendingInviteAfterKey(sess *Session, invite *database.DMInvite) {
+	// Check if initiator also has a key now
+	initiatorKey, _ := s.db.GetUserEncryptionKey(invite.InitiatorUserID)
+	targetKey, _ := s.db.GetUserEncryptionKey(invite.TargetUserID)
+
+	if len(initiatorKey) == 32 && len(targetKey) == 32 {
+		// Both have keys, create encrypted DM
+		channelID, err := s.db.CreateDMChannel(invite.InitiatorUserID, invite.TargetUserID, true)
+		if err != nil {
+			log.Printf("[ERROR] Failed to create DM after key setup: %v", err)
+			return
+		}
+
+		// Delete the invite
+		s.db.DeleteDMInvite(invite.ID)
+
+		// Get user info
+		initiatorUser, _ := s.db.GetUserByID(invite.InitiatorUserID)
+		targetUser, _ := s.db.GetUserByID(invite.TargetUserID)
+
+		// Send DM_READY to both
+		var initiatorPubKey, targetPubKey [32]byte
+		copy(initiatorPubKey[:], initiatorKey)
+		copy(targetPubKey[:], targetKey)
+
+		if targetUser != nil {
+			targetReady := &protocol.DMReadyMessage{
+				ChannelID:      uint64(channelID),
+				OtherUserID:    toUint64Ptr(&invite.InitiatorUserID),
+				OtherNickname:  initiatorUser.Nickname,
+				IsEncrypted:    true,
+				OtherPublicKey: initiatorPubKey,
+			}
+			s.sendMessage(sess, protocol.TypeDMReady, targetReady)
+		}
+
+		if initiatorUser != nil {
+			initiatorReady := &protocol.DMReadyMessage{
+				ChannelID:      uint64(channelID),
+				OtherUserID:    toUint64Ptr(&invite.TargetUserID),
+				OtherNickname:  targetUser.Nickname,
+				IsEncrypted:    true,
+				OtherPublicKey: targetPubKey,
+			}
+			s.sendToUser(invite.InitiatorUserID, protocol.TypeDMReady, initiatorReady)
+		}
+	}
 }

@@ -33,6 +33,9 @@ type Session struct {
 	subscribedThreads  map[uint64]ChannelSubscription // thread_id -> channel subscription
 	subscribedChannels map[ChannelSubscription]bool   // channel/subchannel -> true
 	subMu              sync.RWMutex                   // Protects subscription maps
+
+	// V3 DM encryption (for anonymous users with ephemeral keys)
+	EncryptionPublicKey []byte // X25519 public key (32 bytes, session-only for anonymous)
 }
 
 // SessionManager manages all active sessions

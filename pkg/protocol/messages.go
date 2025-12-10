@@ -26,6 +26,7 @@ const (
 	TypeJoinChannel        = 0x05
 	TypeLeaveChannel       = 0x06
 	TypeCreateChannel      = 0x07
+	TypeCreateSubchannel   = 0x08
 	TypeListMessages       = 0x09
 	TypePostMessage        = 0x0A
 	TypeEditMessage        = 0x0B
@@ -36,12 +37,16 @@ const (
 	TypeUpdateSSHKeyLabel  = 0x12
 	TypeDeleteSSHKey       = 0x13
 	TypeListSSHKeys        = 0x14
+	TypeGetSubchannels     = 0x15
 	TypeLogout             = 0x1C
 	TypePing               = 0x10
 	TypeDisconnect         = 0x11
 	TypeListUsers          = 0x16
 	TypeListChannelUsers   = 0x17
 	TypeGetUnreadCounts    = 0x18
+	TypeStartDM            = 0x19 // V3: Initiate direct message
+	TypeProvidePublicKey   = 0x1A // V3: Upload encryption key
+	TypeAllowUnencrypted   = 0x1B // V3: Allow unencrypted DM
 	TypeUpdateReadState    = 0x1D
 	TypeSubscribeThread    = 0x51
 	TypeUnsubscribeThread  = 0x52
@@ -85,6 +90,7 @@ const (
 	TypeSSHKeyDeleted      = 0x93
 	TypeSSHKeyList         = 0x94
 	TypeSSHKeyAdded        = 0x95
+	TypeSubchannelList     = 0x96
 	TypeUnreadCounts       = 0x97
 	TypeServerConfig       = 0x98
 	TypeSubscribeOk        = 0x99
@@ -93,12 +99,19 @@ const (
 	TypeRegisterAck        = 0x9C
 	TypeHeartbeatAck       = 0x9D
 	TypeVerifyRegistration = 0x9E
-	TypeChannelUserList    = 0xAB
-	TypeChannelPresence    = 0xAC
-	TypeServerPresence     = 0xAD
+
+	// V3 DM responses (Server → Client)
+	TypeKeyRequired = 0xA1 // Server needs encryption key
+	TypeDMReady     = 0xA2 // DM channel is ready
+	TypeDMPending   = 0xA3 // Waiting for other party
+	TypeDMRequest   = 0xA4 // Incoming DM request
+
+	TypeChannelUserList = 0xAB
+	TypeChannelPresence = 0xAC
+	TypeServerPresence  = 0xAD
 
 	// Admin responses (Server → Client)
-	TypeUserBanned     = 0x9F
+	TypeUserBanned = 0x9F
 	TypeIPBanned       = 0xA5
 	TypeUserUnbanned   = 0xA6
 	TypeIPUnbanned     = 0xA7
@@ -488,13 +501,15 @@ func (m *ListChannelsMessage) Decode(payload []byte) error {
 
 // Channel represents a channel in CHANNEL_LIST
 type Channel struct {
-	ID             uint64
-	Name           string
-	Description    string
-	UserCount      uint32
-	IsOperator     bool
-	Type           uint8
-	RetentionHours uint32
+	ID              uint64
+	Name            string
+	Description     string
+	UserCount       uint32
+	IsOperator      bool
+	Type            uint8
+	RetentionHours  uint32
+	HasSubchannels  bool   // V3: true if channel has subchannels
+	SubchannelCount uint16 // V3: number of subchannels
 }
 
 // ChannelListMessage (0x84) - List of channels
@@ -529,6 +544,13 @@ func (m *ChannelListMessage) EncodeTo(w io.Writer) error {
 			return err
 		}
 		if err := WriteUint32(w, ch.RetentionHours); err != nil {
+			return err
+		}
+		// V3: subchannel info
+		if err := WriteBool(w, ch.HasSubchannels); err != nil {
+			return err
+		}
+		if err := WriteUint16(w, ch.SubchannelCount); err != nil {
 			return err
 		}
 	}
@@ -584,15 +606,26 @@ func (m *ChannelListMessage) Decode(payload []byte) error {
 		if err != nil {
 			return err
 		}
+		// V3: subchannel info
+		hasSubchannels, err := ReadBool(buf)
+		if err != nil {
+			return err
+		}
+		subchannelCount, err := ReadUint16(buf)
+		if err != nil {
+			return err
+		}
 
 		m.Channels[i] = Channel{
-			ID:             id,
-			Name:           name,
-			Description:    desc,
-			UserCount:      userCount,
-			IsOperator:     isOp,
-			Type:           chType,
-			RetentionHours: retention,
+			ID:              id,
+			Name:            name,
+			Description:     desc,
+			UserCount:       userCount,
+			IsOperator:      isOp,
+			Type:            chType,
+			RetentionHours:  retention,
+			HasSubchannels:  hasSubchannels,
+			SubchannelCount: subchannelCount,
 		}
 	}
 
@@ -939,6 +972,291 @@ func (m *ChannelCreatedMessage) Decode(payload []byte) error {
 	}
 	m.Message = message
 
+	return nil
+}
+
+// CreateSubchannelMessage (0x08) - Create a new subchannel within a channel
+type CreateSubchannelMessage struct {
+	ChannelID      uint64 // Parent channel ID
+	Name           string // URL-friendly name
+	Description    string
+	Type           uint8  // 0=chat, 1=forum
+	RetentionHours uint32
+}
+
+func (m *CreateSubchannelMessage) EncodeTo(w io.Writer) error {
+	if err := WriteUint64(w, m.ChannelID); err != nil {
+		return err
+	}
+	if err := WriteString(w, m.Name); err != nil {
+		return err
+	}
+	if err := WriteString(w, m.Description); err != nil {
+		return err
+	}
+	if err := WriteUint8(w, m.Type); err != nil {
+		return err
+	}
+	return WriteUint32(w, m.RetentionHours)
+}
+
+func (m *CreateSubchannelMessage) Encode() ([]byte, error) {
+	buf := new(bytes.Buffer)
+	if err := m.EncodeTo(buf); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func (m *CreateSubchannelMessage) Decode(payload []byte) error {
+	buf := bytes.NewReader(payload)
+	channelID, err := ReadUint64(buf)
+	if err != nil {
+		return err
+	}
+	name, err := ReadString(buf)
+	if err != nil {
+		return err
+	}
+	description, err := ReadString(buf)
+	if err != nil {
+		return err
+	}
+	channelType, err := ReadUint8(buf)
+	if err != nil {
+		return err
+	}
+	retentionHours, err := ReadUint32(buf)
+	if err != nil {
+		return err
+	}
+
+	m.ChannelID = channelID
+	m.Name = name
+	m.Description = description
+	m.Type = channelType
+	m.RetentionHours = retentionHours
+	return nil
+}
+
+// SubchannelCreatedMessage (0x88) - Response to CREATE_SUBCHANNEL + broadcast
+type SubchannelCreatedMessage struct {
+	Success        bool
+	ChannelID      uint64 // Parent channel ID (only if success)
+	SubchannelID   uint64 // New subchannel ID (only if success)
+	Name           string // Only if success
+	Description    string // Only if success
+	Type           uint8  // Only if success
+	RetentionHours uint32 // Only if success
+	Message        string // Error or confirmation message
+}
+
+func (m *SubchannelCreatedMessage) EncodeTo(w io.Writer) error {
+	if err := WriteBool(w, m.Success); err != nil {
+		return err
+	}
+	if m.Success {
+		if err := WriteUint64(w, m.ChannelID); err != nil {
+			return err
+		}
+		if err := WriteUint64(w, m.SubchannelID); err != nil {
+			return err
+		}
+		if err := WriteString(w, m.Name); err != nil {
+			return err
+		}
+		if err := WriteString(w, m.Description); err != nil {
+			return err
+		}
+		if err := WriteUint8(w, m.Type); err != nil {
+			return err
+		}
+		if err := WriteUint32(w, m.RetentionHours); err != nil {
+			return err
+		}
+	}
+	return WriteString(w, m.Message)
+}
+
+func (m *SubchannelCreatedMessage) Encode() ([]byte, error) {
+	buf := new(bytes.Buffer)
+	if err := m.EncodeTo(buf); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func (m *SubchannelCreatedMessage) Decode(payload []byte) error {
+	buf := bytes.NewReader(payload)
+	success, err := ReadBool(buf)
+	if err != nil {
+		return err
+	}
+	m.Success = success
+
+	if success {
+		channelID, err := ReadUint64(buf)
+		if err != nil {
+			return err
+		}
+		subchannelID, err := ReadUint64(buf)
+		if err != nil {
+			return err
+		}
+		name, err := ReadString(buf)
+		if err != nil {
+			return err
+		}
+		description, err := ReadString(buf)
+		if err != nil {
+			return err
+		}
+		channelType, err := ReadUint8(buf)
+		if err != nil {
+			return err
+		}
+		retentionHours, err := ReadUint32(buf)
+		if err != nil {
+			return err
+		}
+
+		m.ChannelID = channelID
+		m.SubchannelID = subchannelID
+		m.Name = name
+		m.Description = description
+		m.Type = channelType
+		m.RetentionHours = retentionHours
+	}
+
+	message, err := ReadString(buf)
+	if err != nil {
+		return err
+	}
+	m.Message = message
+	return nil
+}
+
+// GetSubchannelsMessage (0x15) - Request subchannels for a channel
+type GetSubchannelsMessage struct {
+	ChannelID uint64
+}
+
+func (m *GetSubchannelsMessage) EncodeTo(w io.Writer) error {
+	return WriteUint64(w, m.ChannelID)
+}
+
+func (m *GetSubchannelsMessage) Encode() ([]byte, error) {
+	buf := new(bytes.Buffer)
+	if err := m.EncodeTo(buf); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func (m *GetSubchannelsMessage) Decode(payload []byte) error {
+	buf := bytes.NewReader(payload)
+	channelID, err := ReadUint64(buf)
+	if err != nil {
+		return err
+	}
+	m.ChannelID = channelID
+	return nil
+}
+
+// SubchannelInfo represents a single subchannel in a list
+type SubchannelInfo struct {
+	ID             uint64
+	Name           string
+	Description    string
+	Type           uint8
+	RetentionHours uint32
+}
+
+// SubchannelListMessage (0x96) - List of subchannels for a channel
+type SubchannelListMessage struct {
+	ChannelID   uint64
+	Subchannels []SubchannelInfo
+}
+
+func (m *SubchannelListMessage) EncodeTo(w io.Writer) error {
+	if err := WriteUint64(w, m.ChannelID); err != nil {
+		return err
+	}
+	if err := WriteUint16(w, uint16(len(m.Subchannels))); err != nil {
+		return err
+	}
+	for _, sub := range m.Subchannels {
+		if err := WriteUint64(w, sub.ID); err != nil {
+			return err
+		}
+		if err := WriteString(w, sub.Name); err != nil {
+			return err
+		}
+		if err := WriteString(w, sub.Description); err != nil {
+			return err
+		}
+		if err := WriteUint8(w, sub.Type); err != nil {
+			return err
+		}
+		if err := WriteUint32(w, sub.RetentionHours); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *SubchannelListMessage) Encode() ([]byte, error) {
+	buf := new(bytes.Buffer)
+	if err := m.EncodeTo(buf); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func (m *SubchannelListMessage) Decode(payload []byte) error {
+	buf := bytes.NewReader(payload)
+	channelID, err := ReadUint64(buf)
+	if err != nil {
+		return err
+	}
+	count, err := ReadUint16(buf)
+	if err != nil {
+		return err
+	}
+
+	m.ChannelID = channelID
+	m.Subchannels = make([]SubchannelInfo, count)
+
+	for i := uint16(0); i < count; i++ {
+		id, err := ReadUint64(buf)
+		if err != nil {
+			return err
+		}
+		name, err := ReadString(buf)
+		if err != nil {
+			return err
+		}
+		description, err := ReadString(buf)
+		if err != nil {
+			return err
+		}
+		subType, err := ReadUint8(buf)
+		if err != nil {
+			return err
+		}
+		retentionHours, err := ReadUint32(buf)
+		if err != nil {
+			return err
+		}
+
+		m.Subchannels[i] = SubchannelInfo{
+			ID:             id,
+			Name:           name,
+			Description:    description,
+			Type:           subType,
+			RetentionHours: retentionHours,
+		}
+	}
 	return nil
 }
 
@@ -4257,6 +4575,403 @@ func (m *UpdateReadStateMessage) Decode(payload []byte) error {
 	return nil
 }
 
+// ============================================================================
+// V3 Direct Message (DM) Messages
+// ============================================================================
+
+// Target type constants for START_DM
+const (
+	DMTargetByUserID    = 0x00 // Target by registered user ID
+	DMTargetByNickname  = 0x01 // Target by nickname (registered or anonymous)
+	DMTargetBySessionID = 0x02 // Target by session ID (anonymous users)
+)
+
+// Key type constants for PROVIDE_PUBLIC_KEY
+const (
+	KeyTypeDerivedFromSSH = 0x00 // Ed25519 -> X25519 conversion
+	KeyTypeGenerated      = 0x01 // Generated X25519 key
+	KeyTypeEphemeral      = 0x02 // Session-only ephemeral key
+)
+
+// StartDMMessage (0x19) - Initiate a DM with another user
+type StartDMMessage struct {
+	TargetType       uint8  // 0=user_id, 1=nickname, 2=session_id
+	TargetUserID     uint64 // Used when TargetType=0 or TargetType=2
+	TargetNickname   string // Used when TargetType=1
+	AllowUnencrypted bool   // If true, allow unencrypted DM
+}
+
+func (m *StartDMMessage) EncodeTo(w io.Writer) error {
+	if err := WriteUint8(w, m.TargetType); err != nil {
+		return err
+	}
+	switch m.TargetType {
+	case DMTargetByUserID, DMTargetBySessionID:
+		if err := WriteUint64(w, m.TargetUserID); err != nil {
+			return err
+		}
+	case DMTargetByNickname:
+		if err := WriteString(w, m.TargetNickname); err != nil {
+			return err
+		}
+	}
+	return WriteBool(w, m.AllowUnencrypted)
+}
+
+func (m *StartDMMessage) Encode() ([]byte, error) {
+	buf := new(bytes.Buffer)
+	if err := m.EncodeTo(buf); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func (m *StartDMMessage) Decode(payload []byte) error {
+	buf := bytes.NewReader(payload)
+	targetType, err := ReadUint8(buf)
+	if err != nil {
+		return err
+	}
+	m.TargetType = targetType
+
+	switch targetType {
+	case DMTargetByUserID, DMTargetBySessionID:
+		targetID, err := ReadUint64(buf)
+		if err != nil {
+			return err
+		}
+		m.TargetUserID = targetID
+	case DMTargetByNickname:
+		nickname, err := ReadString(buf)
+		if err != nil {
+			return err
+		}
+		m.TargetNickname = nickname
+	}
+
+	allowUnencrypted, err := ReadBool(buf)
+	if err != nil {
+		return err
+	}
+	m.AllowUnencrypted = allowUnencrypted
+	return nil
+}
+
+// ProvidePublicKeyMessage (0x1A) - Upload X25519 public key for encryption
+type ProvidePublicKeyMessage struct {
+	KeyType   uint8    // 0=derived, 1=generated, 2=ephemeral
+	PublicKey [32]byte // X25519 public key (32 bytes)
+	Label     string   // Optional label (e.g., "laptop", "phone")
+}
+
+func (m *ProvidePublicKeyMessage) EncodeTo(w io.Writer) error {
+	if err := WriteUint8(w, m.KeyType); err != nil {
+		return err
+	}
+	if _, err := w.Write(m.PublicKey[:]); err != nil {
+		return err
+	}
+	return WriteString(w, m.Label)
+}
+
+func (m *ProvidePublicKeyMessage) Encode() ([]byte, error) {
+	buf := new(bytes.Buffer)
+	if err := m.EncodeTo(buf); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func (m *ProvidePublicKeyMessage) Decode(payload []byte) error {
+	buf := bytes.NewReader(payload)
+	keyType, err := ReadUint8(buf)
+	if err != nil {
+		return err
+	}
+	m.KeyType = keyType
+
+	if _, err := io.ReadFull(buf, m.PublicKey[:]); err != nil {
+		return err
+	}
+
+	label, err := ReadString(buf)
+	if err != nil {
+		return err
+	}
+	m.Label = label
+	return nil
+}
+
+// AllowUnencryptedMessage (0x1B) - Accept unencrypted DM
+type AllowUnencryptedMessage struct {
+	DMChannelID uint64 // The DM channel ID from the invite
+	Permanent   bool   // If true, allow all future unencrypted DMs
+}
+
+func (m *AllowUnencryptedMessage) EncodeTo(w io.Writer) error {
+	if err := WriteUint64(w, m.DMChannelID); err != nil {
+		return err
+	}
+	return WriteBool(w, m.Permanent)
+}
+
+func (m *AllowUnencryptedMessage) Encode() ([]byte, error) {
+	buf := new(bytes.Buffer)
+	if err := m.EncodeTo(buf); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func (m *AllowUnencryptedMessage) Decode(payload []byte) error {
+	buf := bytes.NewReader(payload)
+	channelID, err := ReadUint64(buf)
+	if err != nil {
+		return err
+	}
+	m.DMChannelID = channelID
+
+	permanent, err := ReadBool(buf)
+	if err != nil {
+		return err
+	}
+	m.Permanent = permanent
+	return nil
+}
+
+// KeyRequiredMessage (0xA1) - Server needs encryption key
+type KeyRequiredMessage struct {
+	Reason      string  // Human-readable explanation
+	DMChannelID *uint64 // Optional: specific DM channel this is for
+}
+
+func (m *KeyRequiredMessage) EncodeTo(w io.Writer) error {
+	if err := WriteString(w, m.Reason); err != nil {
+		return err
+	}
+	return WriteOptionalUint64(w, m.DMChannelID)
+}
+
+func (m *KeyRequiredMessage) Encode() ([]byte, error) {
+	buf := new(bytes.Buffer)
+	if err := m.EncodeTo(buf); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func (m *KeyRequiredMessage) Decode(payload []byte) error {
+	buf := bytes.NewReader(payload)
+	reason, err := ReadString(buf)
+	if err != nil {
+		return err
+	}
+	m.Reason = reason
+
+	channelID, err := ReadOptionalUint64(buf)
+	if err != nil {
+		return err
+	}
+	m.DMChannelID = channelID
+	return nil
+}
+
+// DMReadyMessage (0xA2) - DM channel is ready to use
+type DMReadyMessage struct {
+	ChannelID      uint64   // The DM channel ID
+	OtherUserID    *uint64  // Other user's ID (nil if anonymous)
+	OtherNickname  string   // Other user's nickname
+	IsEncrypted    bool     // Whether this DM uses encryption
+	OtherPublicKey [32]byte // Other party's X25519 public key (only if encrypted)
+}
+
+func (m *DMReadyMessage) EncodeTo(w io.Writer) error {
+	if err := WriteUint64(w, m.ChannelID); err != nil {
+		return err
+	}
+	if err := WriteOptionalUint64(w, m.OtherUserID); err != nil {
+		return err
+	}
+	if err := WriteString(w, m.OtherNickname); err != nil {
+		return err
+	}
+	if err := WriteBool(w, m.IsEncrypted); err != nil {
+		return err
+	}
+	if m.IsEncrypted {
+		if _, err := w.Write(m.OtherPublicKey[:]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *DMReadyMessage) Encode() ([]byte, error) {
+	buf := new(bytes.Buffer)
+	if err := m.EncodeTo(buf); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func (m *DMReadyMessage) Decode(payload []byte) error {
+	buf := bytes.NewReader(payload)
+	channelID, err := ReadUint64(buf)
+	if err != nil {
+		return err
+	}
+	m.ChannelID = channelID
+
+	otherUserID, err := ReadOptionalUint64(buf)
+	if err != nil {
+		return err
+	}
+	m.OtherUserID = otherUserID
+
+	otherNickname, err := ReadString(buf)
+	if err != nil {
+		return err
+	}
+	m.OtherNickname = otherNickname
+
+	isEncrypted, err := ReadBool(buf)
+	if err != nil {
+		return err
+	}
+	m.IsEncrypted = isEncrypted
+
+	if isEncrypted {
+		if _, err := io.ReadFull(buf, m.OtherPublicKey[:]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// DMPendingMessage (0xA3) - Waiting for other party
+type DMPendingMessage struct {
+	DMChannelID        uint64  // The pending DM channel ID
+	WaitingForUserID   *uint64 // Other user's ID (nil if anonymous)
+	WaitingForNickname string  // Other user's nickname
+	Reason             string  // Human-readable status
+}
+
+func (m *DMPendingMessage) EncodeTo(w io.Writer) error {
+	if err := WriteUint64(w, m.DMChannelID); err != nil {
+		return err
+	}
+	if err := WriteOptionalUint64(w, m.WaitingForUserID); err != nil {
+		return err
+	}
+	if err := WriteString(w, m.WaitingForNickname); err != nil {
+		return err
+	}
+	return WriteString(w, m.Reason)
+}
+
+func (m *DMPendingMessage) Encode() ([]byte, error) {
+	buf := new(bytes.Buffer)
+	if err := m.EncodeTo(buf); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func (m *DMPendingMessage) Decode(payload []byte) error {
+	buf := bytes.NewReader(payload)
+	channelID, err := ReadUint64(buf)
+	if err != nil {
+		return err
+	}
+	m.DMChannelID = channelID
+
+	waitingForUserID, err := ReadOptionalUint64(buf)
+	if err != nil {
+		return err
+	}
+	m.WaitingForUserID = waitingForUserID
+
+	waitingForNickname, err := ReadString(buf)
+	if err != nil {
+		return err
+	}
+	m.WaitingForNickname = waitingForNickname
+
+	reason, err := ReadString(buf)
+	if err != nil {
+		return err
+	}
+	m.Reason = reason
+	return nil
+}
+
+// DMRequestMessage (0xA4) - Incoming DM request
+type DMRequestMessage struct {
+	DMChannelID               uint64  // The pending DM channel ID
+	FromUserID                *uint64 // Initiator's user ID (nil if anonymous)
+	FromNickname              string  // Initiator's nickname
+	RequiresKey               bool    // True if recipient needs to set up a key
+	InitiatorAllowsUnencrypted bool    // True if initiator allows unencrypted
+}
+
+func (m *DMRequestMessage) EncodeTo(w io.Writer) error {
+	if err := WriteUint64(w, m.DMChannelID); err != nil {
+		return err
+	}
+	if err := WriteOptionalUint64(w, m.FromUserID); err != nil {
+		return err
+	}
+	if err := WriteString(w, m.FromNickname); err != nil {
+		return err
+	}
+	if err := WriteBool(w, m.RequiresKey); err != nil {
+		return err
+	}
+	return WriteBool(w, m.InitiatorAllowsUnencrypted)
+}
+
+func (m *DMRequestMessage) Encode() ([]byte, error) {
+	buf := new(bytes.Buffer)
+	if err := m.EncodeTo(buf); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func (m *DMRequestMessage) Decode(payload []byte) error {
+	buf := bytes.NewReader(payload)
+	channelID, err := ReadUint64(buf)
+	if err != nil {
+		return err
+	}
+	m.DMChannelID = channelID
+
+	fromUserID, err := ReadOptionalUint64(buf)
+	if err != nil {
+		return err
+	}
+	m.FromUserID = fromUserID
+
+	fromNickname, err := ReadString(buf)
+	if err != nil {
+		return err
+	}
+	m.FromNickname = fromNickname
+
+	requiresKey, err := ReadBool(buf)
+	if err != nil {
+		return err
+	}
+	m.RequiresKey = requiresKey
+
+	allowsUnencrypted, err := ReadBool(buf)
+	if err != nil {
+		return err
+	}
+	m.InitiatorAllowsUnencrypted = allowsUnencrypted
+	return nil
+}
+
 // Compile-time checks to ensure all message types implement the ProtocolMessage interface
 // This will cause a compile error if any message type is missing Encode(), EncodeTo(), or Decode()
 var (
@@ -4337,4 +5052,13 @@ var (
 	_ ProtocolMessage = (*GetUnreadCountsMessage)(nil)
 	_ ProtocolMessage = (*UnreadCountsMessage)(nil)
 	_ ProtocolMessage = (*UpdateReadStateMessage)(nil)
+
+	// V3 DM messages
+	_ ProtocolMessage = (*StartDMMessage)(nil)
+	_ ProtocolMessage = (*ProvidePublicKeyMessage)(nil)
+	_ ProtocolMessage = (*AllowUnencryptedMessage)(nil)
+	_ ProtocolMessage = (*KeyRequiredMessage)(nil)
+	_ ProtocolMessage = (*DMReadyMessage)(nil)
+	_ ProtocolMessage = (*DMPendingMessage)(nil)
+	_ ProtocolMessage = (*DMRequestMessage)(nil)
 )

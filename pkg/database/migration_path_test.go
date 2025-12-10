@@ -346,6 +346,218 @@ func TestMigrationPath(t *testing.T) {
 			},
 		},
 		*/
+
+		// V3 Direct Messages (migration 011)
+		{
+			name:        "v10 → v11: Add DM support",
+			fromVersion: 10,
+			toVersion:   11,
+			setupData: func(db *sql.DB) error {
+				// Create data that should survive DM migration
+				now := time.Now().UnixMilli()
+
+				// Create a user
+				_, err := db.Exec(`
+					INSERT INTO User (id, nickname, user_flags, password_hash, created_at, last_seen)
+					VALUES (1, 'alice', 0, 'hash123', ?, ?)
+				`, now, now)
+				if err != nil {
+					return err
+				}
+
+				// Create a regular channel
+				_, err = db.Exec(`
+					INSERT INTO Channel (id, name, display_name, channel_type, message_retention_hours, is_private, created_at)
+					VALUES (1, 'general', 'General', 1, 168, 0, ?)
+				`, now)
+				if err != nil {
+					return err
+				}
+
+				return nil
+			},
+			validateData: func(db *sql.DB, t *testing.T) {
+				// Verify existing user is preserved with NULL encryption key
+				var encryptionKey []byte
+				err := db.QueryRow("SELECT encryption_public_key FROM User WHERE id = 1").Scan(&encryptionKey)
+				if err != nil {
+					t.Fatalf("Failed to query user: %v", err)
+				}
+				if encryptionKey != nil {
+					t.Errorf("Expected NULL encryption_public_key for existing user, got %v", encryptionKey)
+				}
+
+				// Verify existing channel has is_dm = 0
+				var isDM int
+				err = db.QueryRow("SELECT is_dm FROM Channel WHERE id = 1").Scan(&isDM)
+				if err != nil {
+					t.Fatalf("Failed to query channel: %v", err)
+				}
+				if isDM != 0 {
+					t.Errorf("Expected is_dm=0 for existing channel, got %d", isDM)
+				}
+			},
+			validateSchema: func(db *sql.DB, t *testing.T) {
+				// Verify User.encryption_public_key column exists
+				var colCount int
+				err := db.QueryRow(`
+					SELECT COUNT(*) FROM pragma_table_info('User')
+					WHERE name = 'encryption_public_key'
+				`).Scan(&colCount)
+				if err != nil {
+					t.Fatalf("Failed to check encryption_public_key column: %v", err)
+				}
+				if colCount != 1 {
+					t.Errorf("Column encryption_public_key not found in User table")
+				}
+
+				// Verify Channel.is_dm column exists
+				err = db.QueryRow(`
+					SELECT COUNT(*) FROM pragma_table_info('Channel')
+					WHERE name = 'is_dm'
+				`).Scan(&colCount)
+				if err != nil {
+					t.Fatalf("Failed to check is_dm column: %v", err)
+				}
+				if colCount != 1 {
+					t.Errorf("Column is_dm not found in Channel table")
+				}
+
+				// Verify ChannelAccess table exists
+				var tableCount int
+				err = db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='ChannelAccess'").Scan(&tableCount)
+				if err != nil {
+					t.Fatalf("Failed to check ChannelAccess table: %v", err)
+				}
+				if tableCount != 1 {
+					t.Errorf("ChannelAccess table not found after migration to v11")
+				}
+
+				// Verify DMInvite table exists
+				err = db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='DMInvite'").Scan(&tableCount)
+				if err != nil {
+					t.Fatalf("Failed to check DMInvite table: %v", err)
+				}
+				if tableCount != 1 {
+					t.Errorf("DMInvite table not found after migration to v11")
+				}
+
+				// Verify ChannelAccess indexes exist
+				indexes := []string{"idx_channel_access_user", "idx_channel_access_channel"}
+				for _, index := range indexes {
+					var idxCount int
+					err := db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?", index).Scan(&idxCount)
+					if err != nil {
+						t.Fatalf("Failed to check index %s: %v", index, err)
+					}
+					if idxCount != 1 {
+						t.Errorf("Index %s not found after migration to v11", index)
+					}
+				}
+
+				// Verify DMInvite indexes exist
+				dmIndexes := []string{"idx_dm_invite_target", "idx_dm_invite_initiator"}
+				for _, index := range dmIndexes {
+					var idxCount int
+					err := db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?", index).Scan(&idxCount)
+					if err != nil {
+						t.Fatalf("Failed to check index %s: %v", index, err)
+					}
+					if idxCount != 1 {
+						t.Errorf("Index %s not found after migration to v11", index)
+					}
+				}
+
+				// Test DM creation and access control
+				now := time.Now().UnixMilli()
+
+				// Create second user for DM
+				_, err = db.Exec(`
+					INSERT INTO User (id, nickname, user_flags, password_hash, created_at, last_seen)
+					VALUES (2, 'bob', 0, 'hash456', ?, ?)
+				`, now, now)
+				if err != nil {
+					t.Fatalf("Failed to create second user: %v", err)
+				}
+
+				// Create a DM channel
+				_, err = db.Exec(`
+					INSERT INTO Channel (id, name, display_name, channel_type, message_retention_hours, is_private, is_dm, created_at)
+					VALUES (100, 'dm_1_2', 'Direct Message', 0, 168, 1, 1, ?)
+				`, now)
+				if err != nil {
+					t.Fatalf("Failed to create DM channel: %v", err)
+				}
+
+				// Add both users to ChannelAccess
+				_, err = db.Exec(`
+					INSERT INTO ChannelAccess (channel_id, user_id, created_at) VALUES (100, 1, ?)
+				`, now)
+				if err != nil {
+					t.Fatalf("Failed to add user 1 to channel access: %v", err)
+				}
+				_, err = db.Exec(`
+					INSERT INTO ChannelAccess (channel_id, user_id, created_at) VALUES (100, 2, ?)
+				`, now)
+				if err != nil {
+					t.Fatalf("Failed to add user 2 to channel access: %v", err)
+				}
+
+				// Verify foreign key constraint on ChannelAccess (should fail with invalid user)
+				_, err = db.Exec(`
+					INSERT INTO ChannelAccess (channel_id, user_id, created_at) VALUES (100, 999, ?)
+				`, now)
+				if err == nil {
+					t.Error("Expected foreign key constraint violation for invalid user_id in ChannelAccess")
+				}
+
+				// Verify cascade delete works (delete channel should delete access)
+				_, err = db.Exec(`DELETE FROM Channel WHERE id = 100`)
+				if err != nil {
+					t.Fatalf("Failed to delete channel: %v", err)
+				}
+				var accessCount int
+				err = db.QueryRow("SELECT COUNT(*) FROM ChannelAccess WHERE channel_id = 100").Scan(&accessCount)
+				if err != nil {
+					t.Fatalf("Failed to count channel access: %v", err)
+				}
+				if accessCount != 0 {
+					t.Errorf("Expected 0 channel access entries after channel deletion (CASCADE), got %d", accessCount)
+				}
+
+				// Test DMInvite constraints
+				_, err = db.Exec(`
+					INSERT INTO DMInvite (initiator_user_id, target_user_id, is_encrypted, created_at)
+					VALUES (1, 2, 1, ?)
+				`, now)
+				if err != nil {
+					t.Fatalf("Failed to create DM invite: %v", err)
+				}
+
+				// Verify unique constraint on (initiator, target)
+				_, err = db.Exec(`
+					INSERT INTO DMInvite (initiator_user_id, target_user_id, is_encrypted, created_at)
+					VALUES (1, 2, 0, ?)
+				`, now)
+				if err == nil {
+					t.Error("Expected unique constraint violation for duplicate DM invite")
+				}
+
+				// Verify cascade delete on DMInvite (delete user should delete invites)
+				_, err = db.Exec(`DELETE FROM User WHERE id = 2`)
+				if err != nil {
+					t.Fatalf("Failed to delete user: %v", err)
+				}
+				var inviteCount int
+				err = db.QueryRow("SELECT COUNT(*) FROM DMInvite WHERE target_user_id = 2").Scan(&inviteCount)
+				if err != nil {
+					t.Fatalf("Failed to count DM invites: %v", err)
+				}
+				if inviteCount != 0 {
+					t.Errorf("Expected 0 DM invites after user deletion (CASCADE), got %d", inviteCount)
+				}
+			},
+		},
 	}
 
 	for _, tt := range migrationTests {

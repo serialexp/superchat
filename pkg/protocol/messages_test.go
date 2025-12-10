@@ -2215,3 +2215,552 @@ func TestUpdateReadStateMessage(t *testing.T) {
 		})
 	}
 }
+
+func TestCreateSubchannelMessage(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  CreateSubchannelMessage
+	}{
+		{
+			name: "forum subchannel",
+			msg: CreateSubchannelMessage{
+				ChannelID:      123,
+				Name:           "announcements",
+				Description:    "Important announcements",
+				Type:           1, // forum
+				RetentionHours: 720,
+			},
+		},
+		{
+			name: "chat subchannel",
+			msg: CreateSubchannelMessage{
+				ChannelID:      456,
+				Name:           "general-chat",
+				Description:    "",
+				Type:           0, // chat
+				RetentionHours: 168,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload, err := tt.msg.Encode()
+			require.NoError(t, err)
+
+			decoded := &CreateSubchannelMessage{}
+			err = decoded.Decode(payload)
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.msg.ChannelID, decoded.ChannelID)
+			assert.Equal(t, tt.msg.Name, decoded.Name)
+			assert.Equal(t, tt.msg.Description, decoded.Description)
+			assert.Equal(t, tt.msg.Type, decoded.Type)
+			assert.Equal(t, tt.msg.RetentionHours, decoded.RetentionHours)
+		})
+	}
+}
+
+func TestSubchannelCreatedMessage(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  SubchannelCreatedMessage
+	}{
+		{
+			name: "success",
+			msg: SubchannelCreatedMessage{
+				Success:        true,
+				ChannelID:      123,
+				SubchannelID:   456,
+				Name:           "announcements",
+				Description:    "Important stuff",
+				Type:           1,
+				RetentionHours: 720,
+				Message:        "Subchannel created successfully",
+			},
+		},
+		{
+			name: "failure",
+			msg: SubchannelCreatedMessage{
+				Success: false,
+				Message: "Permission denied",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload, err := tt.msg.Encode()
+			require.NoError(t, err)
+
+			decoded := &SubchannelCreatedMessage{}
+			err = decoded.Decode(payload)
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.msg.Success, decoded.Success)
+			assert.Equal(t, tt.msg.Message, decoded.Message)
+			if tt.msg.Success {
+				assert.Equal(t, tt.msg.ChannelID, decoded.ChannelID)
+				assert.Equal(t, tt.msg.SubchannelID, decoded.SubchannelID)
+				assert.Equal(t, tt.msg.Name, decoded.Name)
+				assert.Equal(t, tt.msg.Description, decoded.Description)
+				assert.Equal(t, tt.msg.Type, decoded.Type)
+				assert.Equal(t, tt.msg.RetentionHours, decoded.RetentionHours)
+			}
+		})
+	}
+}
+
+func TestGetSubchannelsMessage(t *testing.T) {
+	msg := &GetSubchannelsMessage{
+		ChannelID: 12345,
+	}
+
+	payload, err := msg.Encode()
+	require.NoError(t, err)
+
+	decoded := &GetSubchannelsMessage{}
+	err = decoded.Decode(payload)
+	require.NoError(t, err)
+
+	assert.Equal(t, msg.ChannelID, decoded.ChannelID)
+}
+
+func TestSubchannelListMessage(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  SubchannelListMessage
+	}{
+		{
+			name: "empty list",
+			msg: SubchannelListMessage{
+				ChannelID:   123,
+				Subchannels: []SubchannelInfo{},
+			},
+		},
+		{
+			name: "multiple subchannels",
+			msg: SubchannelListMessage{
+				ChannelID: 123,
+				Subchannels: []SubchannelInfo{
+					{
+						ID:             1,
+						Name:           "announcements",
+						Description:    "Important stuff",
+						Type:           1,
+						RetentionHours: 720,
+					},
+					{
+						ID:             2,
+						Name:           "general-chat",
+						Description:    "",
+						Type:           0,
+						RetentionHours: 168,
+					},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload, err := tt.msg.Encode()
+			require.NoError(t, err)
+
+			decoded := &SubchannelListMessage{}
+			err = decoded.Decode(payload)
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.msg.ChannelID, decoded.ChannelID)
+			require.Equal(t, len(tt.msg.Subchannels), len(decoded.Subchannels))
+
+			for i, sub := range tt.msg.Subchannels {
+				assert.Equal(t, sub.ID, decoded.Subchannels[i].ID)
+				assert.Equal(t, sub.Name, decoded.Subchannels[i].Name)
+				assert.Equal(t, sub.Description, decoded.Subchannels[i].Description)
+				assert.Equal(t, sub.Type, decoded.Subchannels[i].Type)
+				assert.Equal(t, sub.RetentionHours, decoded.Subchannels[i].RetentionHours)
+			}
+		})
+	}
+}
+
+// ============================================================================
+// V3 Direct Message (DM) Message Tests
+// ============================================================================
+
+func TestStartDMMessage(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  StartDMMessage
+	}{
+		{
+			name: "target by user ID",
+			msg: StartDMMessage{
+				TargetType:       DMTargetByUserID,
+				TargetUserID:     12345,
+				AllowUnencrypted: false,
+			},
+		},
+		{
+			name: "target by nickname",
+			msg: StartDMMessage{
+				TargetType:       DMTargetByNickname,
+				TargetNickname:   "alice",
+				AllowUnencrypted: true,
+			},
+		},
+		{
+			name: "target by session ID",
+			msg: StartDMMessage{
+				TargetType:       DMTargetBySessionID,
+				TargetUserID:     99999,
+				AllowUnencrypted: false,
+			},
+		},
+		{
+			name: "target by nickname with long name",
+			msg: StartDMMessage{
+				TargetType:       DMTargetByNickname,
+				TargetNickname:   "a_very_long_nickname_here",
+				AllowUnencrypted: true,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload, err := tt.msg.Encode()
+			require.NoError(t, err)
+
+			decoded := &StartDMMessage{}
+			err = decoded.Decode(payload)
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.msg.TargetType, decoded.TargetType)
+			assert.Equal(t, tt.msg.AllowUnencrypted, decoded.AllowUnencrypted)
+
+			switch tt.msg.TargetType {
+			case DMTargetByUserID, DMTargetBySessionID:
+				assert.Equal(t, tt.msg.TargetUserID, decoded.TargetUserID)
+			case DMTargetByNickname:
+				assert.Equal(t, tt.msg.TargetNickname, decoded.TargetNickname)
+			}
+		})
+	}
+}
+
+func TestProvidePublicKeyMessage(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  ProvidePublicKeyMessage
+	}{
+		{
+			name: "derived from SSH key",
+			msg: ProvidePublicKeyMessage{
+				KeyType:   KeyTypeDerivedFromSSH,
+				PublicKey: [32]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32},
+				Label:     "laptop",
+			},
+		},
+		{
+			name: "generated key with empty label",
+			msg: ProvidePublicKeyMessage{
+				KeyType:   KeyTypeGenerated,
+				PublicKey: [32]byte{0xFF, 0xFE, 0xFD, 0xFC, 0xFB, 0xFA, 0xF9, 0xF8, 0xF7, 0xF6, 0xF5, 0xF4, 0xF3, 0xF2, 0xF1, 0xF0, 0xEF, 0xEE, 0xED, 0xEC, 0xEB, 0xEA, 0xE9, 0xE8, 0xE7, 0xE6, 0xE5, 0xE4, 0xE3, 0xE2, 0xE1, 0xE0},
+				Label:     "",
+			},
+		},
+		{
+			name: "ephemeral key",
+			msg: ProvidePublicKeyMessage{
+				KeyType:   KeyTypeEphemeral,
+				PublicKey: [32]byte{},
+				Label:     "session-only",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload, err := tt.msg.Encode()
+			require.NoError(t, err)
+
+			decoded := &ProvidePublicKeyMessage{}
+			err = decoded.Decode(payload)
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.msg.KeyType, decoded.KeyType)
+			assert.Equal(t, tt.msg.PublicKey, decoded.PublicKey)
+			assert.Equal(t, tt.msg.Label, decoded.Label)
+		})
+	}
+}
+
+func TestAllowUnencryptedMessage(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  AllowUnencryptedMessage
+	}{
+		{
+			name: "one-time allowance",
+			msg: AllowUnencryptedMessage{
+				DMChannelID: 12345,
+				Permanent:   false,
+			},
+		},
+		{
+			name: "permanent allowance",
+			msg: AllowUnencryptedMessage{
+				DMChannelID: 99999,
+				Permanent:   true,
+			},
+		},
+		{
+			name: "zero channel ID",
+			msg: AllowUnencryptedMessage{
+				DMChannelID: 0,
+				Permanent:   false,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload, err := tt.msg.Encode()
+			require.NoError(t, err)
+
+			decoded := &AllowUnencryptedMessage{}
+			err = decoded.Decode(payload)
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.msg.DMChannelID, decoded.DMChannelID)
+			assert.Equal(t, tt.msg.Permanent, decoded.Permanent)
+		})
+	}
+}
+
+func TestKeyRequiredMessage(t *testing.T) {
+	channelID := uint64(12345)
+	tests := []struct {
+		name string
+		msg  KeyRequiredMessage
+	}{
+		{
+			name: "with channel ID",
+			msg: KeyRequiredMessage{
+				Reason:      "DM encryption requires a key",
+				DMChannelID: &channelID,
+			},
+		},
+		{
+			name: "without channel ID",
+			msg: KeyRequiredMessage{
+				Reason:      "Please set up encryption before starting DMs",
+				DMChannelID: nil,
+			},
+		},
+		{
+			name: "long reason",
+			msg: KeyRequiredMessage{
+				Reason:      "This is a very long reason message that explains why a key is required for this particular DM conversation to proceed securely",
+				DMChannelID: nil,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload, err := tt.msg.Encode()
+			require.NoError(t, err)
+
+			decoded := &KeyRequiredMessage{}
+			err = decoded.Decode(payload)
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.msg.Reason, decoded.Reason)
+			if tt.msg.DMChannelID != nil {
+				require.NotNil(t, decoded.DMChannelID)
+				assert.Equal(t, *tt.msg.DMChannelID, *decoded.DMChannelID)
+			} else {
+				assert.Nil(t, decoded.DMChannelID)
+			}
+		})
+	}
+}
+
+func TestDMReadyMessage(t *testing.T) {
+	userID := uint64(42)
+	tests := []struct {
+		name string
+		msg  DMReadyMessage
+	}{
+		{
+			name: "encrypted DM with registered user",
+			msg: DMReadyMessage{
+				ChannelID:      12345,
+				OtherUserID:    &userID,
+				OtherNickname:  "alice",
+				IsEncrypted:    true,
+				OtherPublicKey: [32]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32},
+			},
+		},
+		{
+			name: "encrypted DM with anonymous user",
+			msg: DMReadyMessage{
+				ChannelID:      99999,
+				OtherUserID:    nil,
+				OtherNickname:  "anon_guest",
+				IsEncrypted:    true,
+				OtherPublicKey: [32]byte{0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99},
+			},
+		},
+		{
+			name: "unencrypted DM",
+			msg: DMReadyMessage{
+				ChannelID:     54321,
+				OtherUserID:   &userID,
+				OtherNickname: "bob",
+				IsEncrypted:   false,
+				// OtherPublicKey is not sent for unencrypted DMs
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload, err := tt.msg.Encode()
+			require.NoError(t, err)
+
+			decoded := &DMReadyMessage{}
+			err = decoded.Decode(payload)
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.msg.ChannelID, decoded.ChannelID)
+			assert.Equal(t, tt.msg.OtherNickname, decoded.OtherNickname)
+			assert.Equal(t, tt.msg.IsEncrypted, decoded.IsEncrypted)
+
+			if tt.msg.OtherUserID != nil {
+				require.NotNil(t, decoded.OtherUserID)
+				assert.Equal(t, *tt.msg.OtherUserID, *decoded.OtherUserID)
+			} else {
+				assert.Nil(t, decoded.OtherUserID)
+			}
+
+			if tt.msg.IsEncrypted {
+				assert.Equal(t, tt.msg.OtherPublicKey, decoded.OtherPublicKey)
+			}
+		})
+	}
+}
+
+func TestDMPendingMessage(t *testing.T) {
+	userID := uint64(42)
+	tests := []struct {
+		name string
+		msg  DMPendingMessage
+	}{
+		{
+			name: "waiting for registered user",
+			msg: DMPendingMessage{
+				DMChannelID:        12345,
+				WaitingForUserID:   &userID,
+				WaitingForNickname: "alice",
+				Reason:             "Waiting for alice to accept DM request",
+			},
+		},
+		{
+			name: "waiting for anonymous user",
+			msg: DMPendingMessage{
+				DMChannelID:        99999,
+				WaitingForUserID:   nil,
+				WaitingForNickname: "guest123",
+				Reason:             "Waiting for guest123 to set up encryption",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload, err := tt.msg.Encode()
+			require.NoError(t, err)
+
+			decoded := &DMPendingMessage{}
+			err = decoded.Decode(payload)
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.msg.DMChannelID, decoded.DMChannelID)
+			assert.Equal(t, tt.msg.WaitingForNickname, decoded.WaitingForNickname)
+			assert.Equal(t, tt.msg.Reason, decoded.Reason)
+
+			if tt.msg.WaitingForUserID != nil {
+				require.NotNil(t, decoded.WaitingForUserID)
+				assert.Equal(t, *tt.msg.WaitingForUserID, *decoded.WaitingForUserID)
+			} else {
+				assert.Nil(t, decoded.WaitingForUserID)
+			}
+		})
+	}
+}
+
+func TestDMRequestMessage(t *testing.T) {
+	userID := uint64(42)
+	tests := []struct {
+		name string
+		msg  DMRequestMessage
+	}{
+		{
+			name: "encrypted request from registered user",
+			msg: DMRequestMessage{
+				DMChannelID:                12345,
+				FromUserID:                 &userID,
+				FromNickname:               "alice",
+				RequiresKey:                false,
+				InitiatorAllowsUnencrypted: false,
+			},
+		},
+		{
+			name: "request requiring key setup",
+			msg: DMRequestMessage{
+				DMChannelID:                99999,
+				FromUserID:                 &userID,
+				FromNickname:               "bob",
+				RequiresKey:                true,
+				InitiatorAllowsUnencrypted: true,
+			},
+		},
+		{
+			name: "request from anonymous user",
+			msg: DMRequestMessage{
+				DMChannelID:                54321,
+				FromUserID:                 nil,
+				FromNickname:               "anon_guest",
+				RequiresKey:                true,
+				InitiatorAllowsUnencrypted: true,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload, err := tt.msg.Encode()
+			require.NoError(t, err)
+
+			decoded := &DMRequestMessage{}
+			err = decoded.Decode(payload)
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.msg.DMChannelID, decoded.DMChannelID)
+			assert.Equal(t, tt.msg.FromNickname, decoded.FromNickname)
+			assert.Equal(t, tt.msg.RequiresKey, decoded.RequiresKey)
+			assert.Equal(t, tt.msg.InitiatorAllowsUnencrypted, decoded.InitiatorAllowsUnencrypted)
+
+			if tt.msg.FromUserID != nil {
+				require.NotNil(t, decoded.FromUserID)
+				assert.Equal(t, *tt.msg.FromUserID, *decoded.FromUserID)
+			} else {
+				assert.Nil(t, decoded.FromUserID)
+			}
+		})
+	}
+}

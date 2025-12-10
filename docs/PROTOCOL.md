@@ -440,7 +440,7 @@ Request subchannels for a specific channel.
 +-------------------+
 ```
 
-### 0x97 - SUBCHANNEL_LIST (Server → Client)
+### 0x96 - SUBCHANNEL_LIST (Server → Client)
 
 ```
 +-------------------+----------------------+----------------+
@@ -1207,38 +1207,38 @@ Initiate a direct message conversation with another user.
 - If targeting by nickname and multiple users/sessions have that nickname, server picks first match (prefer registered users)
 - For anonymous users, targeting by session_id is more reliable
 
-### 0x13 - PROVIDE_PUBLIC_KEY (Client → Server)
+### 0x1A - PROVIDE_PUBLIC_KEY (Client → Server)
 
-Upload an RSA public key for DM encryption.
+Upload an X25519 public key for DM encryption.
 
 ```
 +-------------------+------------------------+-------------------------+
-| key_type (u8)     | public_key (String)    | label (String)          |
+| key_type (u8)     | public_key (32 bytes)  | label (String)          |
 +-------------------+------------------------+-------------------------+
 ```
 
 **Key Types:**
-- 0x00 = Companion RSA key (for ed25519/ECDSA SSH users)
-- 0x01 = Generated RSA key (for password-only users)
-- 0x02 = Ephemeral RSA key (for anonymous users, session-only)
+- 0x00 = Derived from SSH key (Ed25519 → X25519 conversion)
+- 0x01 = Generated X25519 key (for password-only users)
+- 0x02 = Ephemeral X25519 key (for anonymous users, session-only)
 
 **public_key:**
-- RSA public key in PEM format (2048-bit or 4096-bit)
-- Used for encrypting DM channel keys via RSA-OAEP
+- X25519 public key (32 bytes, raw format)
+- Used for Diffie-Hellman key agreement with other users
 
 **label:**
 - Optional human-readable label (e.g., "laptop", "phone", "work")
 - Helps users manage multiple keys
 
 **Notes:**
-- Key is stored in `SSHKey.encryption_public_key` field
-- For ed25519/ECDSA users: stored alongside SSH key as companion
-- For password-only users: stored as primary encryption key
+- Key is stored in `User.encryption_public_key` field
+- For Ed25519 SSH users: derived from SSH key (automatic)
+- For password-only users: generated client-side
 - For anonymous users: stored temporarily (deleted on disconnect)
 - Server never receives or stores private keys
-- Client stores private key in `~/.superchat/keys/`
+- Client stores private key in `~/.superchat/keys/` (or derives from SSH key)
 
-### 0x14 - ALLOW_UNENCRYPTED (Client → Server)
+### 0x1B - ALLOW_UNENCRYPTED (Client → Server)
 
 Explicitly allow unencrypted DMs for the current user.
 
@@ -1263,7 +1263,7 @@ Explicitly allow unencrypted DMs for the current user.
 - Permanent preference can be changed later through user settings
 - Anonymous users can only use `permanent = false` (no persistent preference)
 
-### 0x93 - KEY_REQUIRED (Server → Client)
+### 0xA1 - KEY_REQUIRED (Server → Client)
 
 Server needs an encryption key before proceeding with DM.
 
@@ -1289,7 +1289,7 @@ Server needs an encryption key before proceeding with DM.
    - Allow unencrypted (if permitted by other party)
 3. Send PROVIDE_PUBLIC_KEY or ALLOW_UNENCRYPTED
 
-### 0x94 - DM_READY (Server → Client)
+### 0xA2 - DM_READY (Server → Client)
 
 DM channel is ready to use.
 
@@ -1298,20 +1298,20 @@ DM channel is ready to use.
 | channel_id (u64)  | other_user_id     | other_nickname(String) |
 |                   | (Optional u64)    |                        |
 +-------------------+-------------------+------------------------+
-| is_encrypted(bool)| channel_key (Optional String)             |
-|                   | (only if encrypted and user has no pubkey)|
+| is_encrypted(bool)| other_public_key (Optional 32 bytes)      |
 +-------------------+-------------------------------------------+
 ```
 
 **Notes:**
 - `other_user_id` is null if other party is anonymous
 - `is_encrypted` indicates whether this DM uses encryption
-- `channel_key` is the symmetric key for this channel (encrypted with user's public key)
-  - Only sent if user has a public key on file
-  - If anonymous user with no key, sent in plaintext (session-only)
+- `other_public_key` is the other party's X25519 public key (32 bytes)
+  - Only present if `is_encrypted = true`
+  - Client computes shared secret: `X25519(my_private, other_public_key)`
+  - Then derives channel key via HKDF with channel_id
 - Client can now use standard JOIN_CHANNEL, POST_MESSAGE, etc. on this channel
 
-### 0x95 - DM_PENDING (Server → Client)
+### 0xA3 - DM_PENDING (Server → Client)
 
 Waiting for other party to complete key setup.
 
@@ -1333,7 +1333,7 @@ Waiting for other party to complete key setup.
 - Client should display waiting indicator
 - Will be followed by DM_READY or ERROR
 
-### 0x96 - DM_REQUEST (Server → Client)
+### 0xA4 - DM_REQUEST (Server → Client)
 
 Incoming DM request from another user.
 
@@ -2386,63 +2386,69 @@ Direct messages are private, encrypted (optional) channels between users. The fl
 
 ### DM Encryption Architecture
 
-SuperChat uses **hybrid encryption** for DMs: RSA for key exchange, AES for message content.
+SuperChat uses **X25519 Diffie-Hellman** for key agreement and **AES-256-GCM** for message encryption. This provides end-to-end encryption where the server never sees plaintext messages or shared secrets.
 
 #### Key Management by User Type
 
-**SSH RSA Users:**
-- SSH key can be used directly for encryption
-- No additional setup needed
-- Seamless experience
+**SSH Ed25519 Users:**
+- Ed25519 SSH key is converted to X25519 (mathematically equivalent curve)
+- Conversion happens client-side automatically
+- No additional setup needed - seamless experience
 
-**SSH ed25519/ECDSA Users:**
-- SSH keys only support signing, not encryption
-- Server detects this and prompts for companion RSA key
-- User generates RSA-2048 keypair (client-side)
+**SSH RSA/ECDSA Users:**
+- SSH key cannot be converted to X25519
+- Client generates separate X25519 keypair on first DM
 - Public key uploaded via PROVIDE_PUBLIC_KEY
-- Private key stored in `~/.superchat/keys/` (never sent to server)
+- Private key stored in `~/.superchat/keys/`
 
 **Password-Only Users:**
-- Generate RSA-2048 keypair on first DM
+- Generate X25519 keypair on first DM
 - Public key uploaded to server
 - Private key stored in `~/.superchat/keys/`
 
 **Anonymous Users:**
-- Generate ephemeral RSA-2048 keypair for session
-- Keys destroyed on disconnect
-- Channel key sent in plaintext (session-only security)
+- Generate ephemeral X25519 keypair for session
+- Keys stored in memory only (destroyed on disconnect)
+- Full encryption supported for session duration
 
 #### Encryption Process
 
-1. **Channel Key Generation:**
-   - Server generates unique AES-256 symmetric key for each DM channel
-   - This key encrypts all messages in the DM
+1. **Key Agreement (Diffie-Hellman):**
+   - Each user has an X25519 keypair (public + private)
+   - Both parties compute shared secret independently:
+     - Alice: `shared = X25519(alice_private, bob_public)`
+     - Bob: `shared = X25519(bob_private, alice_public)`
+   - Math guarantees both compute the same 32-byte shared secret
+   - Server never sees the shared secret
 
-2. **Key Distribution:**
-   - Channel key is encrypted with RSA-OAEP-SHA256 using each participant's public key
-   - Encrypted keys stored in `ChannelAccess` table (one per participant)
-   - Each user decrypts their copy with their private key (client-side)
+2. **Key Derivation:**
+   - Channel key derived from shared secret using HKDF-SHA256:
+     - `channel_key = HKDF(shared_secret, salt="superchat-dm-v1", info=channel_id)`
+   - Produces 32-byte AES-256 key unique to this DM channel
 
 3. **Message Encryption:**
-   - Messages encrypted with AES-256-GCM using channel's symmetric key
-   - Nonce (12 bytes) generated per message
-   - Provides both confidentiality and integrity
+   - Messages encrypted with AES-256-GCM using derived channel key
+   - Nonce (12 bytes) generated randomly per message
+   - Provides both confidentiality and authenticity
 
 4. **Wire Format:**
    ```
-   Encrypted Message:
+   Encrypted Message Payload:
    +----------------+------------------+
    | Nonce (12 B)   | Ciphertext (N B) |
    +----------------+------------------+
    ```
+   - Ciphertext includes GCM authentication tag (16 bytes)
+   - Frame flags byte has bit 1 set (0x02) for encrypted messages
 
 #### Security Properties
 
-- **Algorithms:** RSA-2048 + AES-256-GCM (industry standard)
-- **Forward Secrecy:** Limited (per-channel keys, not per-message)
-- **Authentication:** Via SSH keys or passwords
+- **Algorithms:** X25519 + HKDF-SHA256 + AES-256-GCM (modern standard)
+- **Forward Secrecy:** Not currently implemented (future enhancement)
+- **End-to-End:** Server cannot decrypt messages (no access to shared secret)
+- **Authentication:** Users authenticated via SSH keys or passwords
 - **Key Storage:** Private keys never leave client
-- **Anonymous Users:** Session-only security (plaintext channel key)
+- **Anonymous Users:** Full encryption with ephemeral keys (session-only)
 
 ### Flow 1: Both Users Have Keys (Simple Case)
 
@@ -2457,15 +2463,15 @@ User A (has key)                        Server                          User B (
   |                                       |<-- (implicit accept via          |
   |                                       |     standard flow)                |
   |                                       |                                       |
-  |<-- DM_READY (channel_id, key) ------  |--- DM_READY (channel_id, key) ----->  |
+  |<-- DM_READY (channel_id, bob_pub) --  |--- DM_READY (channel_id, alice_pub) ->|
   |                                       |                                       |
 ```
 
 **Notes:**
-- Server creates private channel with `is_private = true`
-- Generates symmetric channel key
-- Encrypts channel key with both users' public keys
-- Stores in `ChannelAccess` table for each user
+- Server creates private channel with `is_dm = true`
+- Each party receives the other's X25519 public key
+- Both clients compute shared secret via DH and derive channel key
+- Server never sees the shared secret or channel key
 - Both users can now use standard messaging on this channel
 
 ### Flow 2: Initiator Needs Key
@@ -2501,7 +2507,7 @@ User A (has key)                        Server                          User B (
   |                                       |<-- PROVIDE_PUBLIC_KEY ------------  |
   |                                       |    or ALLOW_UNENCRYPTED              |
   |                                       |                                       |
-  |<-- DM_READY (channel_id, key) ------  |--- DM_READY (channel_id, key) ----->  |
+  |<-- DM_READY (channel_id, bob_pub) --  |--- DM_READY (channel_id, alice_pub) ->|
   |                                       |                                       |
 ```
 
@@ -2509,7 +2515,7 @@ User A (has key)                        Server                          User B (
 - User A sees DM_PENDING immediately
 - User B sees DM_REQUEST + KEY_REQUIRED simultaneously
 - While B is setting up their key, they don't see "waiting for A" (they're busy with key setup)
-- Once B completes key setup, both get DM_READY
+- Once B completes key setup, both get DM_READY with each other's public keys
 
 ### Flow 4: Both Users Need Keys
 
@@ -2532,7 +2538,7 @@ User A (no key)                         Server                          User B (
   |                                       |                                       |
   |                                       |<-- PROVIDE_PUBLIC_KEY ------------  |
   |                                       |                                       |
-  |<-- DM_READY (channel_id, key) ------  |--- DM_READY (channel_id, key) ----->  |
+  |<-- DM_READY (channel_id, bob_pub) --  |--- DM_READY (channel_id, alice_pub) ->|
   |                                       |                                       |
 ```
 
@@ -2540,6 +2546,7 @@ User A (no key)                         Server                          User B (
 - A sets up key first, then waits for B
 - B receives DM_REQUEST while setting up key
 - Both complete key setup before DM_READY is sent
+- Each receives the other's public key to compute shared secret
 
 ### Flow 5: Unencrypted DM (Both Allow)
 
@@ -2580,40 +2587,45 @@ User A (registered, has key)            Server                          User B (
   |                                       |    (Note: B is still anonymous,      |
   |                                       |     key is session-only)             |
   |                                       |                                       |
-  |<-- DM_READY (channel_id, key) ------  |--- DM_READY (channel_id,         -->  |
-  |                                       |     key in plaintext for B)          |
+  |<-- DM_READY (channel_id) ------------  |--- DM_READY (channel_id) ---------->  |
+  |                                       |     (both derive key via DH)          |
   |                                       |                                       |
 ```
 
 **Notes:**
 - Anonymous user B can receive DMs by session_id
-- B can generate a local keypair for this session
+- B generates ephemeral X25519 keypair for this session
 - B's key is not permanently stored (lost on disconnect)
-- B's channel key is sent in plaintext in DM_READY (session-only security)
-- Alternatively, B can choose ALLOW_UNENCRYPTED
+- Full encryption via DH: both parties compute shared secret normally
+- Alternatively, B can choose ALLOW_UNENCRYPTED (skips key generation)
 
 ### Encryption Details
 
-**Key Management:**
-- Each DM channel has a unique symmetric key (AES-256)
-- Symmetric key is encrypted with each participant's public key
-- Stored in `ChannelAccess.encryption_key` (one entry per participant)
+**Key Agreement:**
+- Each DM uses X25519 Diffie-Hellman between the two participants
+- Shared secret computed client-side: `X25519(my_private, their_public)`
+- Server stores only public keys, never sees shared secrets
+
+**Key Derivation:**
+- Channel key = `HKDF-SHA256(shared_secret, salt="superchat-dm-v1", info=channel_id_bytes)`
+- Each DM channel has a unique derived key (same shared secret, different channel IDs)
+- 32-byte output used as AES-256 key
 
 **Message Encryption:**
 - Messages in encrypted DMs have Flags bit 1 set (0x02 or 0x03)
-- Payload is encrypted with AES-256-GCM using the channel's symmetric key
-- Each message includes a nonce/IV in the encrypted payload
+- Payload format: `[nonce (12 bytes)][ciphertext + GCM tag]`
+- Nonce generated randomly for each message (never reused)
 
-**Key Rotation:**
-- If user adds a new public key, server re-encrypts all their channel keys
-- Each `ChannelAccess` entry is updated with key encrypted for new public key
-- Old keys can be removed after re-encryption
+**Key Updates:**
+- If user generates a new X25519 keypair, they must re-derive all DM channel keys
+- Client fetches other party's public key and recomputes shared secret
+- No server-side re-encryption needed (DH is symmetric)
 
 **Anonymous User Keys:**
-- Generated client-side, never sent to server (only public key is sent)
+- Generated client-side as ephemeral X25519 keypair
+- Public key uploaded to server (session-only, deleted on disconnect)
 - Private key stored in memory only (lost on disconnect)
-- Channel key sent in plaintext in DM_READY for anonymous users (no way to encrypt it)
-- Trade-off: session-only privacy vs. no setup burden
+- Full encryption supported - no plaintext fallback needed
 
 ## Server Discovery Flow
 

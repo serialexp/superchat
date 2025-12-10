@@ -552,6 +552,10 @@ func (m *MemDB) ListChannels() ([]*Channel, error) {
 
 	channels := make([]*Channel, 0, len(m.channels))
 	for _, ch := range m.channels {
+		// Only include top-level channels (not subchannels)
+		if ch.ParentID != nil {
+			continue
+		}
 		// Return copies to prevent external mutation
 		chCopy := *ch
 		channels = append(channels, &chCopy)
@@ -1078,6 +1082,73 @@ func (m *MemDB) CreateChannel(name, displayName string, description *string, cha
 	return channelID, nil
 }
 
+// CreateSubchannel creates a new subchannel within a parent channel
+func (m *MemDB) CreateSubchannel(parentID int64, name, displayName string, description *string, channelType uint8, retentionHours uint32, createdBy *int64) (int64, error) {
+	// Write to SQLite and get the new ID
+	subchannelID, err := m.sqliteDB.CreateSubchannel(parentID, name, displayName, description, channelType, retentionHours, createdBy)
+	if err != nil {
+		return 0, err
+	}
+
+	// Construct the subchannel object and add to cache
+	now := time.Now().UnixMilli()
+	parentIDCopy := parentID
+	ch := &Channel{
+		ID:                    subchannelID,
+		Name:                  name,
+		DisplayName:           displayName,
+		Description:           description,
+		ChannelType:           channelType,
+		MessageRetentionHours: retentionHours,
+		CreatedBy:             createdBy,
+		CreatedAt:             now,
+		IsPrivate:             false,
+		ParentID:              &parentIDCopy,
+	}
+
+	m.mu.Lock()
+	m.channels[subchannelID] = ch
+	m.mu.Unlock()
+
+	log.Printf("MemDB: added new subchannel to cache: id=%d, name=%s, parent=%d", subchannelID, name, parentID)
+	return subchannelID, nil
+}
+
+// GetSubchannels returns all subchannels for a given parent channel
+func (m *MemDB) GetSubchannels(parentID int64) ([]*Channel, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	subchannels := make([]*Channel, 0)
+	for _, ch := range m.channels {
+		if ch.ParentID != nil && *ch.ParentID == parentID {
+			chCopy := *ch
+			subchannels = append(subchannels, &chCopy)
+		}
+	}
+
+	// Sort subchannels alphabetically by name
+	sort.Slice(subchannels, func(i, j int) bool {
+		return subchannels[i].Name < subchannels[j].Name
+	})
+
+	return subchannels, nil
+}
+
+// GetSubchannelCount returns the number of subchannels for a channel
+func (m *MemDB) GetSubchannelCount(parentID int64) (int, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	count := 0
+	for _, ch := range m.channels {
+		if ch.ParentID != nil && *ch.ParentID == parentID {
+			count++
+		}
+	}
+	return count, nil
+}
+
 // ===== Server Discovery Passthrough Methods =====
 // Discovery operations don't need in-memory caching - they're read-mostly and infrequent
 
@@ -1310,4 +1381,74 @@ func (m *MemDB) GetUnreadCountForThread(threadID uint64, sinceTimestamp int64) (
 	}
 
 	return count, nil
+}
+
+// ============================================================================
+// Direct Message (DM) Methods - V3
+// Delegated to SQLite (DM operations are infrequent, no caching needed)
+// ============================================================================
+
+// SetUserEncryptionKey stores or updates a user's X25519 public key for DM encryption
+func (m *MemDB) SetUserEncryptionKey(userID int64, publicKey []byte) error {
+	return m.sqliteDB.SetUserEncryptionKey(userID, publicKey)
+}
+
+// GetUserEncryptionKey retrieves a user's X25519 public key
+func (m *MemDB) GetUserEncryptionKey(userID int64) ([]byte, error) {
+	return m.sqliteDB.GetUserEncryptionKey(userID)
+}
+
+// CreateDMChannel creates a new DM channel between two users
+func (m *MemDB) CreateDMChannel(user1ID, user2ID int64, isEncrypted bool) (int64, error) {
+	return m.sqliteDB.CreateDMChannel(user1ID, user2ID, isEncrypted)
+}
+
+// GetDMChannels returns all DM channels for a user
+func (m *MemDB) GetDMChannels(userID int64) ([]*Channel, error) {
+	return m.sqliteDB.GetDMChannels(userID)
+}
+
+// GetDMChannelBetweenUsers finds an existing DM channel between two users
+func (m *MemDB) GetDMChannelBetweenUsers(user1ID, user2ID int64) (*Channel, error) {
+	return m.sqliteDB.GetDMChannelBetweenUsers(user1ID, user2ID)
+}
+
+// GetDMOtherUser returns the other user in a DM channel
+func (m *MemDB) GetDMOtherUser(channelID, currentUserID int64) (*User, error) {
+	return m.sqliteDB.GetDMOtherUser(channelID, currentUserID)
+}
+
+// UserHasAccessToChannel checks if a user has access to a specific channel
+func (m *MemDB) UserHasAccessToChannel(userID, channelID int64) (bool, error) {
+	return m.sqliteDB.UserHasAccessToChannel(userID, channelID)
+}
+
+// CreateDMInvite creates a pending DM invite
+func (m *MemDB) CreateDMInvite(initiatorUserID, targetUserID int64, isEncrypted bool) (int64, error) {
+	return m.sqliteDB.CreateDMInvite(initiatorUserID, targetUserID, isEncrypted)
+}
+
+// GetDMInvite retrieves a specific DM invite by ID
+func (m *MemDB) GetDMInvite(inviteID int64) (*DMInvite, error) {
+	return m.sqliteDB.GetDMInvite(inviteID)
+}
+
+// GetDMInviteBetweenUsers finds a pending invite between two users
+func (m *MemDB) GetDMInviteBetweenUsers(user1ID, user2ID int64) (*DMInvite, error) {
+	return m.sqliteDB.GetDMInviteBetweenUsers(user1ID, user2ID)
+}
+
+// GetPendingDMInvitesForUser returns all pending DM invites where user is the target
+func (m *MemDB) GetPendingDMInvitesForUser(userID int64) ([]*DMInvite, error) {
+	return m.sqliteDB.GetPendingDMInvitesForUser(userID)
+}
+
+// DeleteDMInvite removes a DM invite (after accept/decline)
+func (m *MemDB) DeleteDMInvite(inviteID int64) error {
+	return m.sqliteDB.DeleteDMInvite(inviteID)
+}
+
+// DeleteDMInviteBetweenUsers removes any invite between two users
+func (m *MemDB) DeleteDMInviteBetweenUsers(user1ID, user2ID int64) error {
+	return m.sqliteDB.DeleteDMInviteBetweenUsers(user1ID, user2ID)
 }

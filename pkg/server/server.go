@@ -569,6 +569,10 @@ func (s *Server) handleMessage(sess *Session, frame *protocol.Frame) error {
 		return s.handleLeaveChannel(sess, frame)
 	case protocol.TypeCreateChannel:
 		return s.handleCreateChannel(sess, frame)
+	case protocol.TypeCreateSubchannel:
+		return s.handleCreateSubchannel(sess, frame)
+	case protocol.TypeGetSubchannels:
+		return s.handleGetSubchannels(sess, frame)
 	case protocol.TypeListMessages:
 		return s.handleListMessages(sess, frame)
 	case protocol.TypePostMessage:
@@ -633,6 +637,15 @@ func (s *Server) handleMessage(sess *Session, frame *protocol.Frame) error {
 		return s.handleDeleteUser(sess, frame)
 	case protocol.TypeDeleteChannel:
 		return s.handleDeleteChannel(sess, frame)
+
+	// V3 DM messages
+	case protocol.TypeStartDM:
+		return s.handleStartDM(sess, frame)
+	case protocol.TypeProvidePublicKey:
+		return s.handleProvidePublicKey(sess, frame)
+	case protocol.TypeAllowUnencrypted:
+		return s.handleAllowUnencrypted(sess, frame)
+
 	default:
 		// Unknown or unimplemented message type
 		return s.sendError(sess, 1001, "Unsupported message type")

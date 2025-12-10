@@ -225,6 +225,8 @@ type Channel struct {
 	CreatedBy             *int64
 	CreatedAt             int64 // Unix timestamp in milliseconds
 	IsPrivate             bool
+	ParentID              *int64 // V3: NULL for top-level channels, populated for subchannels
+	IsDM                  bool   // V3: true for direct message channels
 }
 
 // Session represents an active connection
@@ -239,12 +241,13 @@ type Session struct {
 
 // User represents a registered user account (V2 feature)
 type User struct {
-	ID           int64
-	Nickname     string
-	UserFlags    uint8  // Bit flags: 0x01=admin, 0x02=moderator
-	PasswordHash string // bcrypt hash
-	CreatedAt    int64  // Unix timestamp in milliseconds
-	LastSeen     int64  // Unix timestamp in milliseconds
+	ID                  int64
+	Nickname            string
+	UserFlags           uint8  // Bit flags: 0x01=admin, 0x02=moderator
+	PasswordHash        string // bcrypt hash
+	CreatedAt           int64  // Unix timestamp in milliseconds
+	LastSeen            int64  // Unix timestamp in milliseconds
+	EncryptionPublicKey []byte // X25519 public key (32 bytes) for DM encryption (V3)
 }
 
 // SSHKey represents an SSH public key for user authentication (V2 feature)
@@ -257,6 +260,22 @@ type SSHKey struct {
 	Label       *string // Optional user-friendly name (e.g., "laptop", "work")
 	AddedAt     int64   // Unix timestamp in milliseconds
 	LastUsedAt  *int64  // Unix timestamp in milliseconds of last successful auth
+}
+
+// ChannelAccess tracks who can access private channels (DMs) - V3 feature
+type ChannelAccess struct {
+	ChannelID int64
+	UserID    int64
+	CreatedAt int64 // Unix timestamp in milliseconds
+}
+
+// DMInvite represents a pending DM request awaiting acceptance - V3 feature
+type DMInvite struct {
+	ID              int64
+	InitiatorUserID int64
+	TargetUserID    int64
+	IsEncrypted     bool  // true if both parties have encryption keys
+	CreatedAt       int64 // Unix timestamp in milliseconds
 }
 
 // Message represents a message record
@@ -351,12 +370,12 @@ func (db *DB) CreateChannel(name, displayName string, description *string, chann
 	return channelID, nil
 }
 
-// ListChannels returns all public channels
+// ListChannels returns all public top-level channels (not subchannels, not DMs)
 func (db *DB) ListChannels() ([]*Channel, error) {
 	rows, err := db.conn.Query(`
-		SELECT id, name, display_name, description, channel_type, message_retention_hours, created_by, created_at, is_private
+		SELECT id, name, display_name, description, channel_type, message_retention_hours, created_by, created_at, is_private, parent_id, is_dm
 		FROM Channel
-		WHERE is_private = 0
+		WHERE is_private = 0 AND parent_id IS NULL AND is_dm = 0
 		ORDER BY name ASC
 	`)
 	if err != nil {
@@ -369,6 +388,7 @@ func (db *DB) ListChannels() ([]*Channel, error) {
 		ch := &Channel{}
 		var desc sql.NullString
 		var createdBy sql.NullInt64
+		var parentID sql.NullInt64
 
 		err := rows.Scan(
 			&ch.ID,
@@ -380,6 +400,8 @@ func (db *DB) ListChannels() ([]*Channel, error) {
 			&createdBy,
 			&ch.CreatedAt,
 			&ch.IsPrivate,
+			&parentID,
+			&ch.IsDM,
 		)
 		if err != nil {
 			return nil, err
@@ -390,6 +412,9 @@ func (db *DB) ListChannels() ([]*Channel, error) {
 		}
 		if createdBy.Valid {
 			ch.CreatedBy = &createdBy.Int64
+		}
+		if parentID.Valid {
+			ch.ParentID = &parentID.Int64
 		}
 
 		channels = append(channels, ch)
@@ -403,9 +428,10 @@ func (db *DB) GetChannel(id int64) (*Channel, error) {
 	ch := &Channel{}
 	var desc sql.NullString
 	var createdBy sql.NullInt64
+	var parentID sql.NullInt64
 
 	err := db.conn.QueryRow(`
-		SELECT id, name, display_name, description, channel_type, message_retention_hours, created_by, created_at, is_private
+		SELECT id, name, display_name, description, channel_type, message_retention_hours, created_by, created_at, is_private, parent_id, is_dm
 		FROM Channel
 		WHERE id = ?
 	`, id).Scan(
@@ -418,6 +444,8 @@ func (db *DB) GetChannel(id int64) (*Channel, error) {
 		&createdBy,
 		&ch.CreatedAt,
 		&ch.IsPrivate,
+		&parentID,
+		&ch.IsDM,
 	)
 
 	if err != nil {
@@ -430,8 +458,108 @@ func (db *DB) GetChannel(id int64) (*Channel, error) {
 	if createdBy.Valid {
 		ch.CreatedBy = &createdBy.Int64
 	}
+	if parentID.Valid {
+		ch.ParentID = &parentID.Int64
+	}
 
 	return ch, nil
+}
+
+// CreateSubchannel creates a new subchannel within a parent channel
+func (db *DB) CreateSubchannel(parentID int64, name, displayName string, description *string, channelType uint8, retentionHours uint32, createdBy *int64) (int64, error) {
+	start := time.Now()
+	descStr := sql.NullString{}
+	if description != nil {
+		descStr.Valid = true
+		descStr.String = *description
+	}
+
+	createdByVal := sql.NullInt64{}
+	if createdBy != nil {
+		createdByVal.Valid = true
+		createdByVal.Int64 = *createdBy
+	}
+
+	result, err := db.writeConn.Exec(`
+		INSERT INTO Channel (name, display_name, description, channel_type, message_retention_hours, created_by, created_at, is_private, parent_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)
+	`, name, displayName, descStr, channelType, retentionHours, createdByVal, nowMillis(), parentID)
+
+	if err != nil {
+		return 0, err
+	}
+
+	subchannelID, err := result.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get last insert ID: %w", err)
+	}
+
+	elapsed := time.Since(start)
+	log.Printf("DB: CreateSubchannel took %v", elapsed)
+
+	return subchannelID, nil
+}
+
+// GetSubchannels returns all subchannels for a given parent channel
+func (db *DB) GetSubchannels(parentID int64) ([]*Channel, error) {
+	rows, err := db.conn.Query(`
+		SELECT id, name, display_name, description, channel_type, message_retention_hours, created_by, created_at, is_private, parent_id, is_dm
+		FROM Channel
+		WHERE parent_id = ?
+		ORDER BY name ASC
+	`, parentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var subchannels []*Channel
+	for rows.Next() {
+		ch := &Channel{}
+		var desc sql.NullString
+		var createdBy sql.NullInt64
+		var parentIDVal sql.NullInt64
+
+		err := rows.Scan(
+			&ch.ID,
+			&ch.Name,
+			&ch.DisplayName,
+			&desc,
+			&ch.ChannelType,
+			&ch.MessageRetentionHours,
+			&createdBy,
+			&ch.CreatedAt,
+			&ch.IsPrivate,
+			&parentIDVal,
+			&ch.IsDM,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		if desc.Valid {
+			ch.Description = &desc.String
+		}
+		if createdBy.Valid {
+			ch.CreatedBy = &createdBy.Int64
+		}
+		if parentIDVal.Valid {
+			ch.ParentID = &parentIDVal.Int64
+		}
+
+		subchannels = append(subchannels, ch)
+	}
+
+	return subchannels, rows.Err()
+}
+
+// GetSubchannelCount returns the number of subchannels for a channel
+func (db *DB) GetSubchannelCount(parentID int64) (int, error) {
+	var count int
+	err := db.conn.QueryRow(`
+		SELECT COUNT(*) FROM Channel WHERE parent_id = ?
+	`, parentID).Scan(&count)
+	return count, err
 }
 
 // CreateSession creates a new session record
@@ -1247,10 +1375,10 @@ func (db *DB) CreateUser(nickname, passwordHash string, userFlags uint8) (int64,
 func (db *DB) GetUserByNickname(nickname string) (*User, error) {
 	var user User
 	err := db.conn.QueryRow(`
-		SELECT id, nickname, user_flags, password_hash, created_at, last_seen
+		SELECT id, nickname, user_flags, password_hash, created_at, last_seen, encryption_public_key
 		FROM User
 		WHERE nickname = ?
-	`, nickname).Scan(&user.ID, &user.Nickname, &user.UserFlags, &user.PasswordHash, &user.CreatedAt, &user.LastSeen)
+	`, nickname).Scan(&user.ID, &user.Nickname, &user.UserFlags, &user.PasswordHash, &user.CreatedAt, &user.LastSeen, &user.EncryptionPublicKey)
 
 	if err != nil {
 		return nil, err // sql.ErrNoRows if not found
@@ -1263,10 +1391,10 @@ func (db *DB) GetUserByNickname(nickname string) (*User, error) {
 func (db *DB) GetUserByID(userID int64) (*User, error) {
 	var user User
 	err := db.conn.QueryRow(`
-		SELECT id, nickname, user_flags, password_hash, created_at, last_seen
+		SELECT id, nickname, user_flags, password_hash, created_at, last_seen, encryption_public_key
 		FROM User
 		WHERE id = ?
-	`, userID).Scan(&user.ID, &user.Nickname, &user.UserFlags, &user.PasswordHash, &user.CreatedAt, &user.LastSeen)
+	`, userID).Scan(&user.ID, &user.Nickname, &user.UserFlags, &user.PasswordHash, &user.CreatedAt, &user.LastSeen, &user.EncryptionPublicKey)
 
 	if err != nil {
 		return nil, err // sql.ErrNoRows if not found
@@ -1279,7 +1407,7 @@ func (db *DB) GetUserByID(userID int64) (*User, error) {
 // Used by admins with LIST_USERS include_offline flag
 func (db *DB) ListAllUsers(limit int) ([]*User, error) {
 	rows, err := db.conn.Query(`
-		SELECT id, nickname, user_flags, password_hash, created_at, last_seen
+		SELECT id, nickname, user_flags, password_hash, created_at, last_seen, encryption_public_key
 		FROM User
 		ORDER BY nickname ASC
 		LIMIT ?
@@ -1293,7 +1421,7 @@ func (db *DB) ListAllUsers(limit int) ([]*User, error) {
 	var users []*User
 	for rows.Next() {
 		var user User
-		if err := rows.Scan(&user.ID, &user.Nickname, &user.UserFlags, &user.PasswordHash, &user.CreatedAt, &user.LastSeen); err != nil {
+		if err := rows.Scan(&user.ID, &user.Nickname, &user.UserFlags, &user.PasswordHash, &user.CreatedAt, &user.LastSeen, &user.EncryptionPublicKey); err != nil {
 			return nil, err
 		}
 		users = append(users, &user)
@@ -2185,4 +2313,306 @@ func (db *DB) GetUnreadCountForThread(threadID uint64, sinceTimestamp int64) (ui
 		return 0, fmt.Errorf("failed to count unread messages in thread: %w", err)
 	}
 	return count, nil
+}
+
+// ============================================================================
+// Direct Message (DM) Methods - V3
+// ============================================================================
+
+// SetUserEncryptionKey stores or updates a user's X25519 public key for DM encryption
+func (db *DB) SetUserEncryptionKey(userID int64, publicKey []byte) error {
+	_, err := db.writeConn.Exec(`
+		UPDATE User SET encryption_public_key = ? WHERE id = ?
+	`, publicKey, userID)
+	return err
+}
+
+// GetUserEncryptionKey retrieves a user's X25519 public key
+func (db *DB) GetUserEncryptionKey(userID int64) ([]byte, error) {
+	var key []byte
+	err := db.conn.QueryRow(`
+		SELECT encryption_public_key FROM User WHERE id = ?
+	`, userID).Scan(&key)
+	if err != nil {
+		return nil, err
+	}
+	return key, nil
+}
+
+// CreateDMChannel creates a new DM channel between two users
+// Returns the new channel ID
+func (db *DB) CreateDMChannel(user1ID, user2ID int64, isEncrypted bool) (int64, error) {
+	tx, err := db.writeConn.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Generate a unique name for the DM channel
+	dmName := fmt.Sprintf("dm_%d_%d", user1ID, user2ID)
+	if user1ID > user2ID {
+		dmName = fmt.Sprintf("dm_%d_%d", user2ID, user1ID)
+	}
+
+	// Create the DM channel (private, is_dm=true)
+	result, err := tx.Exec(`
+		INSERT INTO Channel (name, display_name, channel_type, message_retention_hours, is_private, is_dm, created_at)
+		VALUES (?, ?, 0, 168, 1, 1, ?)
+	`, dmName, "Direct Message", nowMillis())
+	if err != nil {
+		return 0, fmt.Errorf("failed to create DM channel: %w", err)
+	}
+
+	channelID, err := result.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get channel ID: %w", err)
+	}
+
+	// Add both users to ChannelAccess
+	now := nowMillis()
+	_, err = tx.Exec(`
+		INSERT INTO ChannelAccess (channel_id, user_id, created_at) VALUES (?, ?, ?)
+	`, channelID, user1ID, now)
+	if err != nil {
+		return 0, fmt.Errorf("failed to add user1 to channel access: %w", err)
+	}
+
+	_, err = tx.Exec(`
+		INSERT INTO ChannelAccess (channel_id, user_id, created_at) VALUES (?, ?, ?)
+	`, channelID, user2ID, now)
+	if err != nil {
+		return 0, fmt.Errorf("failed to add user2 to channel access: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	return channelID, nil
+}
+
+// GetDMChannels returns all DM channels for a user
+func (db *DB) GetDMChannels(userID int64) ([]*Channel, error) {
+	rows, err := db.conn.Query(`
+		SELECT c.id, c.name, c.display_name, c.description, c.channel_type,
+		       c.message_retention_hours, c.created_by, c.created_at, c.is_private, c.parent_id, c.is_dm
+		FROM Channel c
+		INNER JOIN ChannelAccess ca ON c.id = ca.channel_id
+		WHERE ca.user_id = ? AND c.is_dm = 1
+		ORDER BY c.created_at DESC
+	`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var channels []*Channel
+	for rows.Next() {
+		ch := &Channel{}
+		var desc sql.NullString
+		var createdBy sql.NullInt64
+		var parentID sql.NullInt64
+
+		err := rows.Scan(
+			&ch.ID,
+			&ch.Name,
+			&ch.DisplayName,
+			&desc,
+			&ch.ChannelType,
+			&ch.MessageRetentionHours,
+			&createdBy,
+			&ch.CreatedAt,
+			&ch.IsPrivate,
+			&parentID,
+			&ch.IsDM,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		if desc.Valid {
+			ch.Description = &desc.String
+		}
+		if createdBy.Valid {
+			ch.CreatedBy = &createdBy.Int64
+		}
+		if parentID.Valid {
+			ch.ParentID = &parentID.Int64
+		}
+
+		channels = append(channels, ch)
+	}
+
+	return channels, rows.Err()
+}
+
+// GetDMChannelBetweenUsers finds an existing DM channel between two users
+// Returns nil if no DM channel exists
+func (db *DB) GetDMChannelBetweenUsers(user1ID, user2ID int64) (*Channel, error) {
+	// Find a channel where both users have access and it's a DM
+	row := db.conn.QueryRow(`
+		SELECT c.id, c.name, c.display_name, c.description, c.channel_type,
+		       c.message_retention_hours, c.created_by, c.created_at, c.is_private, c.parent_id, c.is_dm
+		FROM Channel c
+		INNER JOIN ChannelAccess ca1 ON c.id = ca1.channel_id AND ca1.user_id = ?
+		INNER JOIN ChannelAccess ca2 ON c.id = ca2.channel_id AND ca2.user_id = ?
+		WHERE c.is_dm = 1
+		LIMIT 1
+	`, user1ID, user2ID)
+
+	ch := &Channel{}
+	var desc sql.NullString
+	var createdBy sql.NullInt64
+	var parentID sql.NullInt64
+
+	err := row.Scan(
+		&ch.ID,
+		&ch.Name,
+		&ch.DisplayName,
+		&desc,
+		&ch.ChannelType,
+		&ch.MessageRetentionHours,
+		&createdBy,
+		&ch.CreatedAt,
+		&ch.IsPrivate,
+		&parentID,
+		&ch.IsDM,
+	)
+
+	if err == sql.ErrNoRows {
+		return nil, nil // No DM exists
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if desc.Valid {
+		ch.Description = &desc.String
+	}
+	if createdBy.Valid {
+		ch.CreatedBy = &createdBy.Int64
+	}
+	if parentID.Valid {
+		ch.ParentID = &parentID.Int64
+	}
+
+	return ch, nil
+}
+
+// GetDMOtherUser returns the other user in a DM channel
+func (db *DB) GetDMOtherUser(channelID, currentUserID int64) (*User, error) {
+	var user User
+	err := db.conn.QueryRow(`
+		SELECT u.id, u.nickname, u.user_flags, u.password_hash, u.created_at, u.last_seen, u.encryption_public_key
+		FROM User u
+		INNER JOIN ChannelAccess ca ON u.id = ca.user_id
+		WHERE ca.channel_id = ? AND u.id != ?
+		LIMIT 1
+	`, channelID, currentUserID).Scan(
+		&user.ID, &user.Nickname, &user.UserFlags, &user.PasswordHash,
+		&user.CreatedAt, &user.LastSeen, &user.EncryptionPublicKey,
+	)
+
+	if err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
+// UserHasAccessToChannel checks if a user has access to a specific channel
+func (db *DB) UserHasAccessToChannel(userID, channelID int64) (bool, error) {
+	var count int
+	err := db.conn.QueryRow(`
+		SELECT COUNT(*) FROM ChannelAccess WHERE user_id = ? AND channel_id = ?
+	`, userID, channelID).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+// CreateDMInvite creates a pending DM invite
+func (db *DB) CreateDMInvite(initiatorUserID, targetUserID int64, isEncrypted bool) (int64, error) {
+	result, err := db.writeConn.Exec(`
+		INSERT OR REPLACE INTO DMInvite (initiator_user_id, target_user_id, is_encrypted, created_at)
+		VALUES (?, ?, ?, ?)
+	`, initiatorUserID, targetUserID, isEncrypted, nowMillis())
+	if err != nil {
+		return 0, err
+	}
+	return result.LastInsertId()
+}
+
+// GetDMInvite retrieves a specific DM invite by ID
+func (db *DB) GetDMInvite(inviteID int64) (*DMInvite, error) {
+	var invite DMInvite
+	err := db.conn.QueryRow(`
+		SELECT id, initiator_user_id, target_user_id, is_encrypted, created_at
+		FROM DMInvite WHERE id = ?
+	`, inviteID).Scan(&invite.ID, &invite.InitiatorUserID, &invite.TargetUserID, &invite.IsEncrypted, &invite.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &invite, nil
+}
+
+// GetDMInviteBetweenUsers finds a pending invite between two users (in either direction)
+func (db *DB) GetDMInviteBetweenUsers(user1ID, user2ID int64) (*DMInvite, error) {
+	var invite DMInvite
+	err := db.conn.QueryRow(`
+		SELECT id, initiator_user_id, target_user_id, is_encrypted, created_at
+		FROM DMInvite
+		WHERE (initiator_user_id = ? AND target_user_id = ?)
+		   OR (initiator_user_id = ? AND target_user_id = ?)
+		LIMIT 1
+	`, user1ID, user2ID, user2ID, user1ID).Scan(
+		&invite.ID, &invite.InitiatorUserID, &invite.TargetUserID, &invite.IsEncrypted, &invite.CreatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &invite, nil
+}
+
+// GetPendingDMInvitesForUser returns all pending DM invites where user is the target
+func (db *DB) GetPendingDMInvitesForUser(userID int64) ([]*DMInvite, error) {
+	rows, err := db.conn.Query(`
+		SELECT id, initiator_user_id, target_user_id, is_encrypted, created_at
+		FROM DMInvite
+		WHERE target_user_id = ?
+		ORDER BY created_at DESC
+	`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var invites []*DMInvite
+	for rows.Next() {
+		var invite DMInvite
+		if err := rows.Scan(&invite.ID, &invite.InitiatorUserID, &invite.TargetUserID, &invite.IsEncrypted, &invite.CreatedAt); err != nil {
+			return nil, err
+		}
+		invites = append(invites, &invite)
+	}
+	return invites, rows.Err()
+}
+
+// DeleteDMInvite removes a DM invite (after accept/decline)
+func (db *DB) DeleteDMInvite(inviteID int64) error {
+	_, err := db.writeConn.Exec(`DELETE FROM DMInvite WHERE id = ?`, inviteID)
+	return err
+}
+
+// DeleteDMInviteBetweenUsers removes any invite between two users
+func (db *DB) DeleteDMInviteBetweenUsers(user1ID, user2ID int64) error {
+	_, err := db.writeConn.Exec(`
+		DELETE FROM DMInvite
+		WHERE (initiator_user_id = ? AND target_user_id = ?)
+		   OR (initiator_user_id = ? AND target_user_id = ?)
+	`, user1ID, user2ID, user2ID, user1ID)
+	return err
 }
