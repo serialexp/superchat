@@ -2,8 +2,11 @@ package protocol
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"io"
+
+	"github.com/pierrec/lz4/v4"
 )
 
 const (
@@ -11,7 +14,12 @@ const (
 	MaxFrameSize = 1024 * 1024
 
 	// ProtocolVersion is the current protocol version
-	ProtocolVersion = 1
+	// v1: Initial protocol
+	// v2: Added LZ4 compression support (FlagCompressed)
+	ProtocolVersion = 2
+
+	// CompressionThreshold is the minimum payload size to consider compression (512 bytes)
+	CompressionThreshold = 512
 )
 
 // Flag constants
@@ -21,9 +29,11 @@ const (
 )
 
 var (
-	ErrFrameTooLarge      = errors.New("frame exceeds maximum size (1 MB)")
-	ErrInvalidVersion     = errors.New("invalid protocol version")
-	ErrInvalidFrameLength = errors.New("invalid frame length")
+	ErrFrameTooLarge        = errors.New("frame exceeds maximum size (1 MB)")
+	ErrInvalidVersion       = errors.New("invalid protocol version")
+	ErrInvalidFrameLength   = errors.New("invalid frame length")
+	ErrDecompressionFailed  = errors.New("decompression failed")
+	ErrInvalidCompressedLen = errors.New("invalid compressed payload length")
 )
 
 // Frame represents a protocol frame
@@ -35,10 +45,109 @@ type Frame struct {
 	Payload []byte // Message payload
 }
 
-// EncodeFrame writes a frame to the writer
-func EncodeFrame(w io.Writer, f *Frame) error {
+// CompressPayload compresses data using LZ4 and prepends the uncompressed size.
+// Format: [Uncompressed Size (4 bytes, big-endian)][LZ4 Compressed Data]
+// Returns the original data if compression doesn't reduce size.
+func CompressPayload(data []byte) ([]byte, bool) {
+	if len(data) == 0 {
+		return data, false
+	}
+
+	// Allocate buffer for compressed data: 4 bytes for uncompressed size + compressed data
+	maxCompressedSize := lz4.CompressBlockBound(len(data))
+	compressed := make([]byte, 4+maxCompressedSize)
+
+	// Write uncompressed size as first 4 bytes (big-endian)
+	binary.BigEndian.PutUint32(compressed[:4], uint32(len(data)))
+
+	// Compress the data
+	n, err := lz4.CompressBlock(data, compressed[4:], nil)
+	if err != nil || n == 0 {
+		// Compression failed or data is incompressible
+		return data, false
+	}
+
+	// Only use compression if it actually saves space
+	compressedTotal := 4 + n
+	if compressedTotal >= len(data) {
+		return data, false
+	}
+
+	return compressed[:compressedTotal], true
+}
+
+// DecompressPayload decompresses LZ4-compressed data.
+// Expects format: [Uncompressed Size (4 bytes, big-endian)][LZ4 Compressed Data]
+func DecompressPayload(data []byte) ([]byte, error) {
+	if len(data) < 4 {
+		return nil, ErrInvalidCompressedLen
+	}
+
+	// Read uncompressed size from first 4 bytes
+	uncompressedSize := binary.BigEndian.Uint32(data[:4])
+
+	// Sanity check: don't allocate more than MaxFrameSize
+	if uncompressedSize > MaxFrameSize {
+		return nil, ErrFrameTooLarge
+	}
+
+	// Allocate output buffer
+	decompressed := make([]byte, uncompressedSize)
+
+	// Decompress
+	n, err := lz4.UncompressBlock(data[4:], decompressed)
+	if err != nil {
+		return nil, ErrDecompressionFailed
+	}
+
+	if n != int(uncompressedSize) {
+		return nil, ErrDecompressionFailed
+	}
+
+	return decompressed, nil
+}
+
+// EncodeFrame writes a frame to the writer, automatically compressing
+// payloads larger than CompressionThreshold if compression saves space.
+//
+// Optional peerVersion parameter controls compression:
+//   - Not provided: compress if beneficial (for internal/test usage)
+//   - v2 to ProtocolVersion: compress if beneficial (known to support LZ4)
+//   - v1: never compress (lacks support)
+//   - > ProtocolVersion: never compress (unknown future version)
+//
+// Example (assuming ProtocolVersion is 2):
+//
+//	EncodeFrame(w, frame)           // compress if beneficial (default)
+//	EncodeFrame(w, frame, 2)        // compress if beneficial (peer is v2)
+//	EncodeFrame(w, frame, 1)        // never compress (peer is v1)
+//	EncodeFrame(w, frame, 3)        // never compress (unknown future version)
+func EncodeFrame(w io.Writer, f *Frame, peerVersion ...uint8) error {
+	payload := f.Payload
+	flags := f.Flags
+
+	// Determine if peer supports our compression format
+	// - No peerVersion: assume compression OK (internal/test usage)
+	// - v2 to ProtocolVersion: supports LZ4 compression
+	// - v1: no compression (lacks support)
+	// - > ProtocolVersion: no compression (unknown future version)
+	peerSupportsCompression := true
+	if len(peerVersion) > 0 {
+		v := peerVersion[0]
+		peerSupportsCompression = (v >= 2 && v <= ProtocolVersion)
+	}
+
+	// Auto-compress if payload is large enough, not already compressed, and peer supports it
+	if peerSupportsCompression && len(payload) >= CompressionThreshold && flags&FlagCompressed == 0 {
+		compressed, wasCompressed := CompressPayload(payload)
+		if wasCompressed {
+			payload = compressed
+			flags |= FlagCompressed
+		}
+	}
+
 	// Calculate length: Version (1) + Type (1) + Flags (1) + Payload (N)
-	length := uint32(1 + 1 + 1 + len(f.Payload))
+	length := uint32(1 + 1 + 1 + len(payload))
 
 	// Check max frame size (excluding the 4-byte length field itself)
 	if length > MaxFrameSize {
@@ -61,13 +170,13 @@ func EncodeFrame(w io.Writer, f *Frame) error {
 	}
 
 	// Write flags (1 byte)
-	if err := WriteUint8(w, f.Flags); err != nil {
+	if err := WriteUint8(w, flags); err != nil {
 		return err
 	}
 
 	// Write payload
-	if len(f.Payload) > 0 {
-		if _, err := w.Write(f.Payload); err != nil {
+	if len(payload) > 0 {
+		if _, err := w.Write(payload); err != nil {
 			return err
 		}
 	}
@@ -76,8 +185,8 @@ func EncodeFrame(w io.Writer, f *Frame) error {
 	type flusher interface {
 		Flush() error
 	}
-	if f, ok := w.(flusher); ok {
-		return f.Flush()
+	if fl, ok := w.(flusher); ok {
+		return fl.Flush()
 	}
 
 	return nil
@@ -128,6 +237,17 @@ func DecodeFrame(r io.Reader) (*Frame, error) {
 		}
 	}
 
+	// Handle decompression if FlagCompressed is set
+	if flags&FlagCompressed != 0 && len(payload) > 0 {
+		decompressed, err := DecompressPayload(payload)
+		if err != nil {
+			return nil, err
+		}
+		payload = decompressed
+		// Clear compression flag since payload is now decompressed
+		flags &^= FlagCompressed
+	}
+
 	return &Frame{
 		Version: version,
 		Type:    msgType,
@@ -136,8 +256,9 @@ func DecodeFrame(r io.Reader) (*Frame, error) {
 	}, nil
 }
 
-// EncodeMessage is a helper that encodes a message to a byte slice
-func EncodeMessage(version, msgType uint8, flags uint8, payload []byte) ([]byte, error) {
+// EncodeMessage is a helper that encodes a message to a byte slice.
+// Optional peerVersion parameter controls compression (see EncodeFrame).
+func EncodeMessage(version, msgType uint8, flags uint8, payload []byte, peerVersion ...uint8) ([]byte, error) {
 	frame := &Frame{
 		Version: version,
 		Type:    msgType,
@@ -146,7 +267,7 @@ func EncodeMessage(version, msgType uint8, flags uint8, payload []byte) ([]byte,
 	}
 
 	buf := new(bytes.Buffer)
-	if err := EncodeFrame(buf, frame); err != nil {
+	if err := EncodeFrame(buf, frame, peerVersion...); err != nil {
 		return nil, err
 	}
 

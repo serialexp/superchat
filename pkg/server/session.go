@@ -26,6 +26,7 @@ type Session struct {
 	Conn                   *SafeConn    // TCP connection with automatic write synchronization
 	RemoteAddr             string       // Remote address (for rate limiting)
 	JoinedChannel          *int64       // Currently joined channel ID
+	ProtocolVersion        uint8        // Client's protocol version (from frame headers)
 	mu                     sync.RWMutex // Protects Nickname, UserFlags, Shadowbanned, and JoinedChannel
 	lastActivityUpdateTime int64        // Last time we wrote activity to DB (milliseconds, atomic)
 

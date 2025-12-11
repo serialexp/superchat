@@ -16,12 +16,13 @@ import (
 // This design reduces per-client goroutine count from 3 (readLoop + writeLoop + messageReader)
 // to 0, allowing load tests to scale to 20k+ concurrent clients.
 type LoadTestConnection struct {
-	addr   string
-	conn   net.Conn
-	sendMu sync.Mutex // Protects concurrent writes
-	recvMu sync.Mutex // Protects concurrent reads
-	closed bool
-	mu     sync.Mutex // Protects closed flag
+	addr                  string
+	conn                  net.Conn
+	sendMu                sync.Mutex // Protects concurrent writes
+	recvMu                sync.Mutex // Protects concurrent reads
+	closed                bool
+	mu                    sync.Mutex // Protects closed flag
+	serverProtocolVersion uint8      // Server's protocol version from SERVER_CONFIG
 }
 
 // NewLoadTestConnection creates a new load test connection
@@ -104,12 +105,17 @@ func (c *LoadTestConnection) SendMessage(msgType uint8, msg interface{}) error {
 		Payload: payload,
 	}
 
-	// Write frame to connection
-	if err := protocol.EncodeFrame(c.conn, frame); err != nil {
+	// Write frame to connection, passing server version for compression decisions
+	if err := protocol.EncodeFrame(c.conn, frame, c.serverProtocolVersion); err != nil {
 		return fmt.Errorf("write frame failed: %w", err)
 	}
 
 	return nil
+}
+
+// SetServerProtocolVersion sets the server's protocol version (from SERVER_CONFIG)
+func (c *LoadTestConnection) SetServerProtocolVersion(version uint8) {
+	c.serverProtocolVersion = version
 }
 
 // ReceiveMessage reads a frame from the connection with timeout

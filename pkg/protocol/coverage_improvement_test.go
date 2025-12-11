@@ -563,7 +563,7 @@ func TestEncodeFrameEdgeCases(t *testing.T) {
 		frame := &Frame{
 			Version: 1,
 			Type:    TypePing,
-			Flags:   0,
+			Flags:   FlagCompressed, // Mark as already compressed to skip compression attempt
 			Payload: make([]byte, MaxFrameSize+1), // Exceeds max
 		}
 		buf := new(bytes.Buffer)

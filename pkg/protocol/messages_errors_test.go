@@ -352,7 +352,8 @@ func TestEncodeFrameError(t *testing.T) {
 
 func TestEncodeMessageError(t *testing.T) {
 	t.Run("oversized message", func(t *testing.T) {
-		_, err := EncodeMessage(1, TypePostMessage, 0, make([]byte, MaxFrameSize))
+		// Mark as already compressed to skip compression attempt
+		_, err := EncodeMessage(1, TypePostMessage, FlagCompressed, make([]byte, MaxFrameSize))
 		assert.Error(t, err)
 		assert.Equal(t, ErrFrameTooLarge, err)
 	})

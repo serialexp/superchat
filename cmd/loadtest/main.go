@@ -234,6 +234,12 @@ func (bc *BotClient) Connect() error {
 		return fmt.Errorf("unexpected message type: 0x%02X, expected server config", frame.Type)
 	}
 
+	// Decode server config and store version for compression decisions
+	serverConfig := &protocol.ServerConfigMessage{}
+	if err := serverConfig.Decode(frame.Payload); err == nil {
+		bc.conn.SetServerProtocolVersion(serverConfig.ProtocolVersion)
+	}
+
 	// Set nickname
 	msg := &protocol.SetNicknameMessage{Nickname: bc.nickname}
 	if err := bc.conn.SendMessage(protocol.TypeSetNickname, msg); err != nil {

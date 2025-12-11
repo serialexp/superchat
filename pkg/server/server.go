@@ -99,7 +99,7 @@ func DefaultConfig() ServerConfig {
 		InactiveCleanupDays:     90,   // days
 		MaxMessageLength:        4096, // bytes
 		SessionTimeoutSeconds:   120,  // 2 minutes
-		ProtocolVersion:         1,
+		ProtocolVersion:         protocol.ProtocolVersion,
 		MaxThreadSubscriptions:  50,   // max thread subscriptions per session
 		MaxChannelSubscriptions: 10,   // max channel subscriptions per session
 		DirectoryEnabled:        true, // Default: directory mode enabled
@@ -418,7 +418,7 @@ func (s *Server) notifyClientsOfShutdown() {
 	// Send to all sessions concurrently (best effort)
 	sent := 0
 	for _, sess := range sessions {
-		if err := sess.Conn.EncodeFrame(frame); err == nil {
+		if err := sess.Conn.EncodeFrame(frame, sess.ProtocolVersion); err == nil {
 			sent++
 		}
 	}
@@ -526,6 +526,11 @@ func (s *Server) messageLoop(sess *Session, conn net.Conn) {
 		}
 
 		debugLog.Printf("Session %d ← RECV: Type=0x%02X Flags=0x%02X PayloadLen=%d", sess.ID, frame.Type, frame.Flags, len(frame.Payload))
+
+		// Capture client's protocol version from frame headers (use first non-zero version seen)
+		if sess.ProtocolVersion == 0 && frame.Version > 0 {
+			sess.ProtocolVersion = frame.Version
+		}
 
 		// Update session activity (buffered write, rate-limited to half of session timeout)
 		s.sessions.UpdateSessionActivity(sess, time.Now().UnixMilli())
@@ -701,7 +706,7 @@ func (s *Server) sendServerConfig(sess *Session) error {
 	if s.metrics != nil {
 		s.metrics.RecordMessageSent(messageTypeToString(protocol.TypeServerConfig))
 	}
-	return sess.Conn.EncodeFrame(frame)
+	return sess.Conn.EncodeFrame(frame, sess.ProtocolVersion)
 }
 
 // sendError sends an ERROR message to a session
@@ -726,7 +731,7 @@ func (s *Server) sendError(sess *Session, code uint16, message string) error {
 	if s.metrics != nil {
 		s.metrics.RecordMessageSent(messageTypeToString(protocol.TypeError))
 	}
-	return sess.Conn.EncodeFrame(frame)
+	return sess.Conn.EncodeFrame(frame, sess.ProtocolVersion)
 }
 
 // isAdmin checks if a session belongs to an admin user
@@ -949,8 +954,12 @@ func (s *Server) verifyServerReachability(host string, port uint16) (*protocol.S
 		return nil, fmt.Errorf("failed to decode SERVER_CONFIG: %w", err)
 	}
 
-	if serverConfigMsg.ProtocolVersion != protocol.ProtocolVersion {
-		return nil, fmt.Errorf("protocol mismatch (remote=%d, local=%d)", serverConfigMsg.ProtocolVersion, protocol.ProtocolVersion)
+	// Best effort: try to verify servers of any version
+	// The verification protocol is simple and unlikely to change
+	// Just don't use compression for peers with unknown/higher versions
+	peerVersion := serverConfigMsg.ProtocolVersion
+	if peerVersion > protocol.ProtocolVersion {
+		log.Printf("Note: verifying server with newer protocol v%d (we are v%d)", peerVersion, protocol.ProtocolVersion)
 	}
 
 	challenge := uint64(time.Now().UnixNano())
@@ -964,13 +973,13 @@ func (s *Server) verifyServerReachability(host string, port uint16) (*protocol.S
 	}
 
 	verifyFrame := &protocol.Frame{
-		Version: 1,
+		Version: protocol.ProtocolVersion,
 		Type:    protocol.TypeVerifyRegistration,
 		Flags:   0,
 		Payload: payload,
 	}
 
-	if err := protocol.EncodeFrame(conn, verifyFrame); err != nil {
+	if err := protocol.EncodeFrame(conn, verifyFrame, peerVersion); err != nil {
 		return nil, fmt.Errorf("failed to send VERIFY_REGISTRATION: %w", err)
 	}
 
@@ -998,7 +1007,7 @@ func (s *Server) verifyServerReachability(host string, port uint16) (*protocol.S
 			}
 
 			// Try to close the connection gracefully; ignore errors.
-			_ = sendDisconnectFrame(conn, "Directory verification complete")
+			_ = sendDisconnectFrame(conn, "Directory verification complete", peerVersion)
 			return serverConfigMsg, nil
 
 		case protocol.TypeError:
@@ -1023,7 +1032,8 @@ func (s *Server) verifyServerReachability(host string, port uint16) (*protocol.S
 }
 
 // sendDisconnectFrame attempts to send a DISCONNECT frame with an optional reason.
-func sendDisconnectFrame(conn net.Conn, reason string) error {
+// peerVersion controls compression; if 0, defaults to current protocol version.
+func sendDisconnectFrame(conn net.Conn, reason string, peerVersion uint8) error {
 	var msg protocol.DisconnectMessage
 	if reason != "" {
 		msg.Reason = &reason
@@ -1041,7 +1051,10 @@ func sendDisconnectFrame(conn net.Conn, reason string) error {
 		Payload: payload,
 	}
 
-	return protocol.EncodeFrame(conn, frame)
+	if peerVersion == 0 {
+		peerVersion = protocol.ProtocolVersion
+	}
+	return protocol.EncodeFrame(conn, frame, peerVersion)
 }
 
 // ===== Server Discovery Methods =====
@@ -1189,16 +1202,13 @@ func (s *Server) maintainDirectoryAnnouncement(directoryAddr, ourHostname string
 			continue
 		}
 
-		if serverConfigMsg.ProtocolVersion != protocol.ProtocolVersion {
-			log.Printf("Protocol version mismatch with %s (server=%d, directory=%d)", directoryAddr, serverConfigMsg.ProtocolVersion, protocol.ProtocolVersion)
-			conn.Close()
-			if !s.waitForDirectoryRetry() {
-				return
-			}
-			continue
+		// Best effort: try to register with directories of any version
+		// The registration protocol is simple and unlikely to change
+		peerVersion := serverConfigMsg.ProtocolVersion
+		if peerVersion > protocol.ProtocolVersion {
+			log.Printf("Note: registering with directory using newer protocol v%d (we are v%d)", peerVersion, protocol.ProtocolVersion)
 		}
-
-		log.Printf("Handshake with directory %s succeeded (protocol v%d)", directoryAddr, serverConfigMsg.ProtocolVersion)
+		log.Printf("Handshake with directory %s succeeded (protocol v%d)", directoryAddr, peerVersion)
 
 		// Send REGISTER_SERVER
 		registerMsg := &protocol.RegisterServerMessage{
@@ -1221,13 +1231,13 @@ func (s *Server) maintainDirectoryAnnouncement(directoryAddr, ourHostname string
 		}
 
 		frame := &protocol.Frame{
-			Version: 1,
+			Version: protocol.ProtocolVersion,
 			Type:    protocol.TypeRegisterServer,
 			Flags:   0,
 			Payload: payload,
 		}
 
-		if err := protocol.EncodeFrame(conn, frame); err != nil {
+		if err := protocol.EncodeFrame(conn, frame, peerVersion); err != nil {
 			log.Printf("Failed to send REGISTER_SERVER to %s: %v", directoryAddr, err)
 			conn.Close()
 			if !s.waitForDirectoryRetry() {
@@ -1301,13 +1311,13 @@ func (s *Server) maintainDirectoryAnnouncement(directoryAddr, ourHostname string
 				}
 
 				respFrame := &protocol.Frame{
-					Version: 1,
+					Version: protocol.ProtocolVersion,
 					Type:    protocol.TypeVerifyResponse,
 					Flags:   0,
 					Payload: respPayload,
 				}
 
-				if err := protocol.EncodeFrame(conn, respFrame); err != nil {
+				if err := protocol.EncodeFrame(conn, respFrame, peerVersion); err != nil {
 					log.Printf("Failed to send VERIFY_RESPONSE to %s: %v", directoryAddr, err)
 				} else {
 					log.Printf("Sent VERIFY_RESPONSE to %s", directoryAddr)
@@ -1335,7 +1345,7 @@ func (s *Server) maintainDirectoryAnnouncement(directoryAddr, ourHostname string
 		}
 
 		// Send graceful disconnect and finish.
-		if err := sendDisconnectFrame(conn, "Registration complete"); err != nil {
+		if err := sendDisconnectFrame(conn, "Registration complete", peerVersion); err != nil {
 			log.Printf("Failed to send DISCONNECT to %s: %v", directoryAddr, err)
 		}
 		conn.Close()

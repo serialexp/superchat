@@ -130,7 +130,12 @@ func (b *Bot) Run() error {
 		b.conn.close()
 		return fmt.Errorf("server config: %w", err)
 	}
-	b.logger.Printf("Received server config")
+	// Decode and store server protocol version for compression decisions
+	serverConfig := &protocol.ServerConfigMessage{}
+	if err := serverConfig.Decode(frame.Payload); err == nil {
+		b.conn.setServerProtocolVersion(serverConfig.ProtocolVersion)
+	}
+	b.logger.Printf("Received server config (protocol v%d)", serverConfig.ProtocolVersion)
 
 	// Set nickname
 	b.logger.Printf("Setting nickname: %s", b.nickname)

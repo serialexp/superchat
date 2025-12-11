@@ -11,14 +11,15 @@ import (
 
 // connection handles the low-level protocol communication.
 type connection struct {
-	addr   string
-	conn   net.Conn
-	sendMu sync.Mutex
-	closed bool
-	mu     sync.RWMutex
+	addr                  string
+	conn                  net.Conn
+	sendMu                sync.Mutex
+	closed                bool
+	mu                    sync.RWMutex
+	serverProtocolVersion uint8 // Server's protocol version from SERVER_CONFIG
 
 	// Response channels for request/response patterns
-	responseMu sync.Mutex
+	responseMu  sync.Mutex
 	responsesCh chan *protocol.Frame
 
 	// Broadcast handler
@@ -87,11 +88,23 @@ func (c *connection) send(msgType uint8, msg protocol.ProtocolMessage) error {
 		Payload: payload,
 	}
 
-	if err := protocol.EncodeFrame(c.conn, frame); err != nil {
+	// Pass server version for compression decisions
+	c.mu.RLock()
+	serverVersion := c.serverProtocolVersion
+	c.mu.RUnlock()
+
+	if err := protocol.EncodeFrame(c.conn, frame, serverVersion); err != nil {
 		return fmt.Errorf("write frame failed: %w", err)
 	}
 
 	return nil
+}
+
+// setServerProtocolVersion sets the server's protocol version (from SERVER_CONFIG)
+func (c *connection) setServerProtocolVersion(version uint8) {
+	c.mu.Lock()
+	c.serverProtocolVersion = version
+	c.mu.Unlock()
 }
 
 // receiveLoop reads frames from the connection and dispatches them.

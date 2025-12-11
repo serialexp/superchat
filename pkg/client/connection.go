@@ -78,7 +78,8 @@ type Connection struct {
 	lastSuccessfulMethod string // Track what worked for auto-reconnect
 
 	// Protocol validation
-	protocolTimeout time.Duration
+	protocolTimeout       time.Duration
+	serverProtocolVersion uint8 // Server's protocol version from SERVER_CONFIG
 
 	// Traffic counters (bytes on the wire)
 	bytesSent     atomic.Uint64
@@ -369,9 +370,13 @@ func (c *Connection) validateProtocol() error {
 		return fmt.Errorf("failed to decode SERVER_CONFIG: %w", err)
 	}
 
-	// Verify protocol version
-	if serverConfig.ProtocolVersion != protocol.ProtocolVersion {
-		return fmt.Errorf("protocol version mismatch: server uses v%d, client uses v%d",
+	// Store server's protocol version for compression decisions
+	c.serverProtocolVersion = serverConfig.ProtocolVersion
+
+	// Best effort: try to talk to servers of any version
+	// Core protocol is stable; just don't use features the server might not understand
+	if serverConfig.ProtocolVersion > protocol.ProtocolVersion {
+		c.logf("Note: server uses newer protocol v%d (we are v%d), some features may not work",
 			serverConfig.ProtocolVersion, protocol.ProtocolVersion)
 	}
 
@@ -673,15 +678,16 @@ func (c *Connection) writeLoop() {
 			conn := c.conn
 			connected := c.connected
 			throttle := c.throttleBytesPerSec
+			serverVersion := c.serverProtocolVersion
 			c.mu.RUnlock()
 
 			if !connected || conn == nil {
 				continue
 			}
 
-			// Encode to buffer first
+			// Encode to buffer first, passing server version for compression decisions
 			var buf bytes.Buffer
-			if err := protocol.EncodeFrame(&buf, frame); err != nil {
+			if err := protocol.EncodeFrame(&buf, frame, serverVersion); err != nil {
 				c.logf("Encode error: %v", err)
 				c.errors <- fmt.Errorf("encode error: %w", err)
 				continue

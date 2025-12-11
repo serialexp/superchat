@@ -26,6 +26,40 @@ var (
 	ErrClientDisconnecting = errors.New("client disconnecting")
 )
 
+// encodedFrame holds pre-encoded frame bytes for different protocol versions
+type encodedFrame struct {
+	v1Bytes []byte // Uncompressed encoding for v1 clients
+	v2Bytes []byte // Compressed encoding for v2+ clients (nil if compression didn't help)
+}
+
+// encodeFrameVersionAware encodes a frame for both v1 and v2+ clients.
+// Returns v1 (uncompressed) and optionally v2 (compressed) encodings.
+// v2Bytes will be nil if compression didn't reduce size.
+func encodeFrameVersionAware(frame *protocol.Frame) (*encodedFrame, error) {
+	// Encode for v1 (no compression)
+	var v1Buf bytes.Buffer
+	if err := protocol.EncodeFrame(&v1Buf, frame, 1); err != nil {
+		return nil, fmt.Errorf("failed to encode v1 frame: %w", err)
+	}
+
+	// Encode for v2 (with compression if beneficial)
+	var v2Buf bytes.Buffer
+	if err := protocol.EncodeFrame(&v2Buf, frame, 2); err != nil {
+		return nil, fmt.Errorf("failed to encode v2 frame: %w", err)
+	}
+
+	result := &encodedFrame{
+		v1Bytes: v1Buf.Bytes(),
+	}
+
+	// Only use v2 encoding if it's actually different (compression was applied)
+	if v2Buf.Len() < v1Buf.Len() {
+		result.v2Bytes = v2Buf.Bytes()
+	}
+
+	return result, nil
+}
+
 // dbError logs a database error and sends an error response to the client
 func (s *Server) dbError(sess *Session, operation string, err error) error {
 	errorLog.Printf("Session %d: %s failed: %v", sess.ID, operation, err)
@@ -1541,7 +1575,7 @@ func (s *Server) sendMessage(sess *Session, msgType uint8, msg interface{}) erro
 
 	// Send frame (SafeConn automatically handles write synchronization)
 	debugLog.Printf("Session %d → SEND: Type=0x%02X Flags=0x%02X PayloadLen=%d", sess.ID, msgType, 0, len(payload))
-	if err := sess.Conn.EncodeFrame(frame); err != nil {
+	if err := sess.Conn.EncodeFrame(frame, sess.ProtocolVersion); err != nil {
 		errorLog.Printf("Session %d: EncodeFrame failed (Type=0x%02X): %v", sess.ID, msgType, err)
 		return err
 	}
@@ -1565,7 +1599,7 @@ func (s *Server) broadcastToChannel(channelID int64, msgType uint8, msg interfac
 		return err
 	}
 
-	// Create and encode frame once
+	// Create frame
 	frame := &protocol.Frame{
 		Version: protocol.ProtocolVersion,
 		Type:    msgType,
@@ -1573,11 +1607,11 @@ func (s *Server) broadcastToChannel(channelID int64, msgType uint8, msg interfac
 		Payload: payload,
 	}
 
-	var buf bytes.Buffer
-	if err := protocol.EncodeFrame(&buf, frame); err != nil {
-		return fmt.Errorf("failed to encode frame: %w", err)
+	// Pre-encode for both v1 and v2 clients
+	encoded, err := encodeFrameVersionAware(frame)
+	if err != nil {
+		return err
 	}
-	frameBytes := buf.Bytes()
 
 	// Collect target sessions: both joined sessions AND channel subscribers
 	targetSessionsMap := make(map[uint64]*Session)
@@ -1611,8 +1645,8 @@ func (s *Server) broadcastToChannel(channelID int64, msgType uint8, msg interfac
 		targetSessions = append(targetSessions, sess)
 	}
 
-	// Broadcast to target sessions using worker pool
-	deadSessions := s.broadcastToSessionsParallel(targetSessions, frameBytes)
+	// Broadcast to target sessions using version-aware worker pool
+	deadSessions := s.broadcastToSessionsVersionAware(targetSessions, encoded.v1Bytes, encoded.v2Bytes)
 
 	// Remove dead sessions
 	for _, sessID := range deadSessions {
@@ -1625,6 +1659,15 @@ func (s *Server) broadcastToChannel(channelID int64, msgType uint8, msg interfac
 // broadcastToSessionsParallel broadcasts frameBytes to sessions using a worker pool
 // Returns list of session IDs that had write errors
 func (s *Server) broadcastToSessionsParallel(sessions []*Session, frameBytes []byte) []uint64 {
+	// Use version-aware broadcast with only uncompressed bytes (legacy compatibility)
+	return s.broadcastToSessionsVersionAware(sessions, frameBytes, nil)
+}
+
+// broadcastToSessionsVersionAware broadcasts to sessions with version-aware encoding.
+// v1Bytes is sent to v1 clients, v2Bytes is sent to v2+ clients.
+// If v2Bytes is nil, v1Bytes is sent to all clients.
+// Returns list of session IDs that had write errors.
+func (s *Server) broadcastToSessionsVersionAware(sessions []*Session, v1Bytes, v2Bytes []byte) []uint64 {
 	const maxWorkers = 40
 	const sessionsPerWorker = 50
 
@@ -1658,6 +1701,12 @@ func (s *Server) broadcastToSessionsParallel(sessions []*Session, frameBytes []b
 		go func(sessionChunk []*Session) {
 			defer wg.Done()
 			for _, sess := range sessionChunk {
+				// Choose appropriate encoding based on client's protocol version
+				frameBytes := v1Bytes
+				if v2Bytes != nil && sess.ProtocolVersion >= 2 {
+					frameBytes = v2Bytes
+				}
+
 				if writeErr := sess.Conn.WriteBytes(frameBytes); writeErr != nil {
 					debugLog.Printf("Session %d: Broadcast write failed: %v", sess.ID, writeErr)
 					deadSessionsMu.Lock()
@@ -1683,7 +1732,7 @@ func (s *Server) broadcastNewMessage(authorSess *Session, msg *protocol.NewMessa
 		return fmt.Errorf("failed to encode message: %w", err)
 	}
 
-	// Create and encode frame ONCE
+	// Create frame
 	frame := &protocol.Frame{
 		Version: protocol.ProtocolVersion,
 		Type:    protocol.TypeNewMessage,
@@ -1691,12 +1740,11 @@ func (s *Server) broadcastNewMessage(authorSess *Session, msg *protocol.NewMessa
 		Payload: payload,
 	}
 
-	// Encode frame to bytes once
-	var buf bytes.Buffer
-	if err := protocol.EncodeFrame(&buf, frame); err != nil {
-		return fmt.Errorf("failed to encode frame: %w", err)
+	// Pre-encode for both v1 and v2 clients
+	encoded, err := encodeFrameVersionAware(frame)
+	if err != nil {
+		return err
 	}
-	frameBytes := buf.Bytes()
 
 	// Build channel subscription key
 	var subchannelID *uint64
@@ -1759,9 +1807,9 @@ func (s *Server) broadcastNewMessage(authorSess *Session, msg *protocol.NewMessa
 		targetSessions = filteredSessions
 	}
 
-	// Broadcast to target sessions using worker pool
+	// Broadcast to target sessions using version-aware worker pool
 	recipientCount = len(targetSessions)
-	deadSessions := s.broadcastToSessionsParallel(targetSessions, frameBytes)
+	deadSessions := s.broadcastToSessionsVersionAware(targetSessions, encoded.v1Bytes, encoded.v2Bytes)
 
 	// Remove dead sessions
 	for _, sessID := range deadSessions {
@@ -2243,7 +2291,7 @@ func (s *Server) broadcastToAll(msgType uint8, msg interface{}) error {
 		return err
 	}
 
-	// Create and encode frame once
+	// Create frame
 	frame := &protocol.Frame{
 		Version: protocol.ProtocolVersion,
 		Type:    msgType,
@@ -2251,17 +2299,17 @@ func (s *Server) broadcastToAll(msgType uint8, msg interface{}) error {
 		Payload: payload,
 	}
 
-	var buf bytes.Buffer
-	if err := protocol.EncodeFrame(&buf, frame); err != nil {
-		return fmt.Errorf("failed to encode frame: %w", err)
+	// Pre-encode for both v1 and v2 clients
+	encoded, err := encodeFrameVersionAware(frame)
+	if err != nil {
+		return err
 	}
-	frameBytes := buf.Bytes()
 
 	// Get all sessions
 	allSessions := s.sessions.GetAllSessions()
 
-	// Broadcast to target sessions using worker pool
-	deadSessions := s.broadcastToSessionsParallel(allSessions, frameBytes)
+	// Broadcast to target sessions using version-aware worker pool
+	deadSessions := s.broadcastToSessionsVersionAware(allSessions, encoded.v1Bytes, encoded.v2Bytes)
 
 	// Remove dead sessions
 	for _, sessID := range deadSessions {

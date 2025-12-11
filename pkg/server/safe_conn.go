@@ -30,10 +30,11 @@ func NewSafeConn(conn net.Conn) *SafeConn {
 
 // EncodeFrame encodes and sends a protocol frame with automatic write synchronization.
 // This is the ONLY way to write frames to the connection - the raw conn is private.
-func (sc *SafeConn) EncodeFrame(frame *protocol.Frame) error {
+// Optional peerVersion controls compression (see protocol.EncodeFrame).
+func (sc *SafeConn) EncodeFrame(frame *protocol.Frame, peerVersion ...uint8) error {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
-	return protocol.EncodeFrame(sc.conn, frame)
+	return protocol.EncodeFrame(sc.conn, frame, peerVersion...)
 }
 
 // ReadFrame reads a protocol frame from the connection.

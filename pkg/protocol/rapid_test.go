@@ -13,7 +13,9 @@ func TestFrameRoundTrip(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		// Generate random frame components
 		msgType := rapid.Byte().Draw(t, "type")
-		flags := rapid.Byte().Draw(t, "flags")
+		// Mask out compression flag - compressed frames require valid LZ4 data
+		// which we test separately in TestCompressionRoundTrip
+		flags := rapid.Byte().Draw(t, "flags") &^ FlagCompressed
 		payloadLen := rapid.IntRange(0, 1024).Draw(t, "payloadLen")
 		payload := rapid.SliceOfN(rapid.Byte(), payloadLen, payloadLen).Draw(t, "payload")
 
@@ -50,6 +52,58 @@ func TestFrameRoundTrip(t *testing.T) {
 		}
 		if !bytes.Equal(decoded.Payload, original.Payload) {
 			t.Fatalf("payload mismatch")
+		}
+	})
+}
+
+// TestCompressionRoundTripRapid tests that any frame with compression enabled round-trips correctly
+func TestCompressionRoundTripRapid(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		// Generate random frame components
+		msgType := rapid.Byte().Draw(t, "type")
+		// Generate other flags (but not compression - we handle that)
+		otherFlags := rapid.Byte().Draw(t, "otherFlags") &^ FlagCompressed
+		// Generate compressible payload (repeated pattern)
+		patternLen := rapid.IntRange(1, 50).Draw(t, "patternLen")
+		pattern := rapid.SliceOfN(rapid.Byte(), patternLen, patternLen).Draw(t, "pattern")
+		repeatCount := rapid.IntRange(10, 100).Draw(t, "repeatCount")
+
+		payload := bytes.Repeat(pattern, repeatCount)
+
+		// Create frame
+		original := &Frame{
+			Version: ProtocolVersion,
+			Type:    msgType,
+			Flags:   otherFlags,
+			Payload: payload,
+		}
+
+		// Encode with compression
+		var buf bytes.Buffer
+		err := EncodeFrame(&buf, original)
+		if err != nil {
+			t.Fatalf("encode failed: %v", err)
+		}
+
+		// Decode (should auto-decompress)
+		decoded, err := DecodeFrame(&buf)
+		if err != nil {
+			t.Fatalf("decode failed: %v", err)
+		}
+
+		// Verify round-trip
+		if decoded.Version != original.Version {
+			t.Fatalf("version mismatch: got %d, want %d", decoded.Version, original.Version)
+		}
+		if decoded.Type != original.Type {
+			t.Fatalf("type mismatch: got %d, want %d", decoded.Type, original.Type)
+		}
+		// Other flags should be preserved, compression flag should be cleared after decompress
+		if decoded.Flags != otherFlags {
+			t.Fatalf("flags mismatch: got %d, want %d", decoded.Flags, otherFlags)
+		}
+		if !bytes.Equal(decoded.Payload, original.Payload) {
+			t.Fatalf("payload mismatch: got %d bytes, want %d bytes", len(decoded.Payload), len(original.Payload))
 		}
 	})
 }
