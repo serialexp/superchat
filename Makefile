@@ -1,4 +1,4 @@
-.PHONY: test coverage coverage-html coverage-lcov coverage-protocol coverage-summary fuzz clean build run-server run-client run-website website docker-build docker-build-push docker-build-server docker-build-website docker-run docker-push docker-stop
+.PHONY: test coverage coverage-html coverage-lcov coverage-protocol coverage-summary fuzz clean build build-desktop build-gui-legacy run-server run-client run-website website docker-build docker-build-push docker-build-server docker-build-website docker-run docker-push docker-stop
 
 # Run all tests
 test:
@@ -68,14 +68,26 @@ coverage-summary:
 fuzz:
 	go test ./pkg/protocol -fuzz=FuzzDecodeFrame -fuzztime=5m
 
-# Build server, terminal client, and GUI client
+# Build server and terminal client
 build:
 	@VERSION=$$(git describe --tags --always --dirty 2>/dev/null || echo "dev"); \
 	echo "Building with version: $$VERSION"; \
 	go build -ldflags="-X main.Version=$$VERSION" -o superchat-server ./cmd/server; \
 	go build -ldflags="-X main.Version=$$VERSION" -o superchat ./cmd/client; \
-	go build -ldflags="-X main.Version=$$VERSION" -o superchat-gui ./cmd/client-gui; \
-	echo "✓ Built: superchat-server, superchat, superchat-gui"
+	echo "✓ Built: superchat-server, superchat"
+
+# Build desktop client (requires wails and bun)
+build-desktop:
+	@echo "Building desktop client..."
+	cd superchat-desktop && bun install && wails build -tags webkit2_41
+	cp superchat-desktop/build/bin/superchat-desktop ./superchat-desktop-bin
+	@echo "✓ Built: superchat-desktop-bin"
+
+# Build legacy GUI client (Gio-based, deprecated)
+build-gui-legacy:
+	@VERSION=$$(git describe --tags --always --dirty 2>/dev/null || echo "dev"); \
+	go build -ldflags="-X main.Version=$$VERSION" -o superchat-gui-legacy ./cmd/client-gui; \
+	echo "✓ Built: superchat-gui-legacy"
 
 # Run server
 run-server:
@@ -144,4 +156,4 @@ clean:
 	rm -f server.out server.lcov
 	rm -f client.out client.lcov
 	rm -f database.out database.lcov
-	rm -f superchat-server superchat superchat-gui
+	rm -f superchat-server superchat superchat-desktop-bin superchat-gui-legacy

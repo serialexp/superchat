@@ -145,9 +145,87 @@ jobs:
           name: ${{ matrix.name }}
           path: ${{ matrix.name }}
 
+  build-desktop:
+    name: Build Desktop Client (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    needs: verify-builds
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            arch: amd64
+            name: superchat-desktop-linux-amd64
+          - os: macos-latest
+            platform: darwin
+            arch: universal
+            name: superchat-desktop-darwin-universal
+          - os: windows-latest
+            platform: windows
+            arch: amd64
+            name: superchat-desktop-windows-amd64.exe
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Wails
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Build Desktop Client (Linux)
+        if: matrix.platform == 'linux'
+        working-directory: superchat-desktop
+        run: |
+          bun install
+          wails build -platform ${{ matrix.platform }}/${{ matrix.arch }} -tags webkit2_41
+
+      - name: Build Desktop Client (macOS/Windows)
+        if: matrix.platform != 'linux'
+        working-directory: superchat-desktop
+        run: |
+          bun install
+          wails build -platform ${{ matrix.platform }}/${{ matrix.arch }}
+
+      - name: Rename binary (Linux/macOS)
+        if: matrix.platform != 'windows'
+        working-directory: superchat-desktop
+        run: mv build/bin/superchat-desktop ${{ matrix.name }}
+
+      - name: Rename binary (Windows)
+        if: matrix.platform == 'windows'
+        working-directory: superchat-desktop
+        run: mv build/bin/superchat-desktop.exe ${{ matrix.name }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: superchat-desktop/${{ matrix.name }}
+
   release:
     name: Create Release
-    needs: [build, build-server]
+    needs: [build, build-server, build-desktop]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
