@@ -1,0 +1,39 @@
+# Build stage
+FROM golang:1.24-alpine AS builder
+
+# Install build dependencies
+RUN apk add --no-cache git make
+
+# Set working directory
+WORKDIR /build
+
+# Copy go mod files
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build the simulator binary
+RUN CGO_ENABLED=0 GOOS=linux go build -o superchat-simulator ./cmd/simulator
+
+# Final stage - minimal image
+FROM alpine:latest
+
+# Add ca-certificates for HTTPS (needed for Ollama API calls)
+RUN apk --no-cache add ca-certificates
+
+# Create non-root user
+RUN addgroup -g 1000 superchat && \
+    adduser -D -u 1000 -G superchat superchat
+
+# Copy binary from builder
+COPY --from=builder /build/superchat-simulator /usr/local/bin/superchat-simulator
+RUN chmod +x /usr/local/bin/superchat-simulator
+
+# Switch to non-root user
+USER superchat
+
+# Default command
+ENTRYPOINT ["superchat-simulator"]
+CMD ["--help"]
