@@ -151,6 +151,13 @@ func (m *MockConnection) DisableAutoReconnect() {
 	m.autoReconnect = false
 }
 
+// EnableAutoReconnect enables automatic reconnection
+func (m *MockConnection) EnableAutoReconnect() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.autoReconnect = true
+}
+
 // SetThrottle is a no-op for mock
 func (m *MockConnection) SetThrottle(bytesPerSec int) {
 	// No-op for mock

@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/76creates/stickers/flexbox"
 	"github.com/aeolun/superchat/pkg/client"
@@ -16,6 +17,11 @@ func (m Model) View() string {
 	// Don't render until we have dimensions
 	if m.width == 0 || m.height == 0 {
 		return "Loading..."
+	}
+
+	// Render privacy delay countdown overlay (takes priority over disconnected overlay)
+	if m.privacyDelayActive {
+		return m.renderPrivacyDelayOverlay()
 	}
 
 	// Render disconnection/reconnecting overlay if not connected
@@ -1644,6 +1650,59 @@ func (m Model) renderReconnectingOverlay() string {
 	box := lipgloss.NewStyle().
 		Border(lipgloss.DoubleBorder()).
 		BorderForeground(WarningColor).
+		Padding(2, 4).
+		Render(content)
+
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
+}
+
+// renderPrivacyDelayOverlay renders a countdown overlay during privacy delay
+func (m Model) renderPrivacyDelayOverlay() string {
+	remaining := time.Until(m.privacyDelayEnd)
+	if remaining < 0 {
+		remaining = 0
+	}
+
+	title := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(PrimaryColor).
+		Align(lipgloss.Center).
+		MarginBottom(2).
+		Render("GOING ANONYMOUS")
+
+	explanation := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("252")).
+		Align(lipgloss.Center).
+		MarginBottom(2).
+		Render("Waiting before reconnecting to protect your privacy...")
+
+	// Show countdown in seconds with one decimal
+	seconds := remaining.Seconds()
+	countdown := lipgloss.NewStyle().
+		Foreground(WarningColor).
+		Bold(true).
+		Align(lipgloss.Center).
+		MarginBottom(2).
+		Render(fmt.Sprintf("%.1fs", seconds))
+
+	info := lipgloss.NewStyle().
+		Foreground(MutedColor).
+		Align(lipgloss.Center).
+		Render("This delay makes it harder to associate\nyour anonymous identity with your previous session.")
+
+	content := lipgloss.JoinVertical(
+		lipgloss.Center,
+		"",
+		title,
+		explanation,
+		countdown,
+		info,
+		"",
+	)
+
+	box := lipgloss.NewStyle().
+		Border(lipgloss.DoubleBorder()).
+		BorderForeground(PrimaryColor).
 		Padding(2, 4).
 		Render(content)
 

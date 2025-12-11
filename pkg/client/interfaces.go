@@ -26,6 +26,7 @@ type ConnectionInterface interface {
 
 	// Configuration
 	DisableAutoReconnect()
+	EnableAutoReconnect()
 	SetThrottle(bytesPerSec int)
 
 	// Traffic statistics

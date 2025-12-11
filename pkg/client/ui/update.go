@@ -154,6 +154,46 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.errorMessage = ""
 		return m, listenForServerFrames(m.conn, m.connGeneration)
 
+	case PrivacyDelayTickMsg:
+		if m.privacyDelayActive {
+			remaining := time.Until(m.privacyDelayEnd)
+			if remaining <= 0 {
+				return m, func() tea.Msg { return PrivacyDelayCompleteMsg{} }
+			}
+			// Continue ticking every 100ms for smooth countdown
+			return m, tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg {
+				return PrivacyDelayTickMsg{}
+			})
+		}
+		return m, nil
+
+	case PrivacyDelayCompleteMsg:
+		if m.privacyDelayActive {
+			m.privacyDelayActive = false
+
+			// Set the new anonymous nickname
+			m.nickname = m.privacyDelayNickname
+			m.privacyDelayNickname = ""
+
+			// Clear auth state
+			m.userID = nil
+			m.userFlags = 0
+			m.authState = AuthStateAnonymous
+			m.state.SetUserID(nil)
+			m.state.SetLastNickname(m.nickname)
+
+			// Re-enable auto-reconnect and connect
+			m.conn.EnableAutoReconnect()
+			if err := m.conn.Connect(); err != nil {
+				m.errorMessage = fmt.Sprintf("Reconnect failed: %v", err)
+				m.connectionState = StateDisconnected
+				return m, nil
+			}
+			m.connectionState = StateReconnecting
+			return m, listenForServerFrames(m.conn, m.connGeneration)
+		}
+		return m, nil
+
 	case ServerListTimeoutMsg:
 		// Server list request timed out
 		if m.awaitingServerList {

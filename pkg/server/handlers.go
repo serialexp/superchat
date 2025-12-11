@@ -350,6 +350,9 @@ func (s *Server) handleRegisterUser(sess *Session, frame *protocol.Frame) error 
 		log.Printf("Session %d: failed to update session user_id: %v", sess.ID, err)
 	}
 
+	// Broadcast updated presence to all clients
+	s.notifyServerPresence(sess, true)
+
 	// Send success response
 	resp := &protocol.RegisterResponseMessage{
 		Success: true,

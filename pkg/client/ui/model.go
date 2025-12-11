@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"log"
+	"math/rand"
 	"sort"
 	"strings"
 	"time"
@@ -183,6 +184,11 @@ type Model struct {
 	serverDisconnectReason string // Reason provided by server in DISCONNECT message
 	showHelp               bool
 	firstRun               bool
+
+	// Privacy delay for "Go Anonymous" feature
+	privacyDelayActive   bool      // True during privacy delay countdown
+	privacyDelayEnd      time.Time // When the delay ends
+	privacyDelayNickname string    // Nickname to use after reconnect
 
 	// Version tracking
 	currentVersion  string
@@ -1209,19 +1215,22 @@ func (m *Model) showGoAnonymousModal() {
 	nicknameModal := modal.NewNicknameChangeModal(
 		"", // Don't pre-fill with current nickname
 		func(newNickname string) tea.Cmd {
-			// Clear authentication locally first
-			m.userID = nil
-			m.userFlags = 0
-			m.authState = AuthStateAnonymous
-			m.state.SetUserID(nil)
-			m.state.SetLastNickname(newNickname)
+			// Store the nickname for after reconnect
+			m.privacyDelayNickname = newNickname
 
-			// Send LOGOUT first, then SET_NICKNAME
-			// TCP guarantees these arrive in order, so server will process LOGOUT before SET_NICKNAME
-			return tea.Batch(
-				m.sendLogout(),
-				m.sendSetNicknameWith(newNickname),
-			)
+			// Random delay between 1-5 seconds for privacy
+			delay := time.Duration(1000+rand.Intn(4000)) * time.Millisecond
+			m.privacyDelayEnd = time.Now().Add(delay)
+			m.privacyDelayActive = true
+
+			// Disable auto-reconnect and disconnect
+			m.conn.DisableAutoReconnect()
+			m.conn.Disconnect()
+
+			// Start the countdown ticker
+			return tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg {
+				return PrivacyDelayTickMsg{}
+			})
 		},
 		func() tea.Cmd {
 			// Canceled
@@ -1938,6 +1947,12 @@ type ConnectionAttemptResultMsg struct {
 type ExecuteCommandMsg struct {
 	CommandName string
 }
+
+// PrivacyDelayTickMsg is sent during privacy delay countdown
+type PrivacyDelayTickMsg struct{}
+
+// PrivacyDelayCompleteMsg is sent when privacy delay countdown finishes
+type PrivacyDelayCompleteMsg struct{}
 
 // Init initializes the model
 func (m Model) Init() tea.Cmd {
