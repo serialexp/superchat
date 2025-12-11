@@ -219,20 +219,20 @@ h4 {
 
 .download-buttons {
     display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 10px;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
     margin-top: auto;
 }
 
 .download-btn {
     display: block;
-    padding: 10px;
+    padding: 8px 4px;
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: 4px;
     text-decoration: none;
     color: var(--text);
-    font-size: 0.9em;
+    font-size: 0.85em;
     font-weight: 500;
     transition: all 0.2s;
 }
@@ -243,12 +243,32 @@ h4 {
     color: var(--bg);
 }
 
-.download-btn.client {
+.download-btn.tui {
     border-color: var(--accent);
+}
+
+.download-btn.gui {
+    border-color: #a371f7;
+}
+
+.download-btn.gui:hover {
+    background: #a371f7;
+    border-color: #a371f7;
 }
 
 .download-btn.server {
     border-color: var(--success);
+}
+
+.download-btn.server:hover {
+    background: var(--success);
+    border-color: var(--success);
+}
+
+.download-btn.disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    pointer-events: none;
 }
 
 pre {

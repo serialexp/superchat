@@ -3,12 +3,11 @@ const GITHUB_REPO = 'aeolun/superchat';
 
 // Platform configurations
 const PLATFORMS = [
-    { name: 'Linux', arch: 'x86_64', clientPattern: /^superchat-linux-amd64/, serverPattern: /^superchat-server-linux-amd64/ },
-    { name: 'Linux', arch: 'ARM64', clientPattern: /^superchat-linux-arm64/, serverPattern: /^superchat-server-linux-arm64/ },
-    { name: 'macOS', arch: 'Intel', clientPattern: /^superchat-darwin-amd64/, serverPattern: /^superchat-server-darwin-amd64/ },
-    { name: 'macOS', arch: 'Apple Silicon', clientPattern: /^superchat-darwin-arm64/, serverPattern: /^superchat-server-darwin-arm64/ },
-    { name: 'Windows', arch: 'x86_64', clientPattern: /^superchat-windows-amd64/, serverPattern: /^superchat-server-windows-amd64/ },
-    { name: 'FreeBSD', arch: 'x86_64', clientPattern: /^superchat-freebsd-amd64/, serverPattern: /^superchat-server-freebsd-amd64/ }
+    { name: 'Linux', arch: 'x86_64', tuiPattern: /^superchat-linux-amd64/, guiPattern: /^superchat-desktop-linux-amd64/, serverPattern: /^superchat-server-linux-amd64/ },
+    { name: 'Linux', arch: 'ARM64', tuiPattern: /^superchat-linux-arm64/, guiPattern: null, serverPattern: /^superchat-server-linux-arm64/ },
+    { name: 'macOS', arch: 'Universal', tuiPattern: /^superchat-darwin-(amd64|arm64)/, guiPattern: /^superchat-desktop-darwin-universal/, serverPattern: /^superchat-server-darwin-(amd64|arm64)/ },
+    { name: 'Windows', arch: 'x86_64', tuiPattern: /^superchat-windows-amd64/, guiPattern: /^superchat-desktop-windows-amd64/, serverPattern: /^superchat-server-windows-amd64/ },
+    { name: 'FreeBSD', arch: 'x86_64', tuiPattern: /^superchat-freebsd-amd64/, guiPattern: null, serverPattern: /^superchat-server-freebsd-amd64/ }
 ];
 
 async function fetchLatestRelease() {
@@ -24,7 +23,24 @@ async function fetchLatestRelease() {
     }
 }
 
-function createDownloadCard(platform, clientAsset, serverAsset) {
+function createDownloadButton(asset, className, label, title) {
+    const btn = document.createElement('a');
+    btn.className = `download-btn ${className}`;
+    btn.textContent = label;
+    if (title) btn.title = title;
+
+    if (asset) {
+        btn.href = asset.browser_download_url;
+    } else {
+        btn.classList.add('disabled');
+        btn.title = 'Not available for this platform';
+        btn.addEventListener('click', (e) => e.preventDefault());
+    }
+
+    return btn;
+}
+
+function createDownloadCard(platform, tuiAsset, guiAsset, serverAsset) {
     const card = document.createElement('div');
     card.className = 'download-card';
 
@@ -39,21 +55,9 @@ function createDownloadCard(platform, clientAsset, serverAsset) {
     const buttons = document.createElement('div');
     buttons.className = 'download-buttons';
 
-    if (clientAsset) {
-        const clientBtn = document.createElement('a');
-        clientBtn.className = 'download-btn client';
-        clientBtn.href = clientAsset.browser_download_url;
-        clientBtn.textContent = 'Client';
-        buttons.appendChild(clientBtn);
-    }
-
-    if (serverAsset) {
-        const serverBtn = document.createElement('a');
-        serverBtn.className = 'download-btn server';
-        serverBtn.href = serverAsset.browser_download_url;
-        serverBtn.textContent = 'Server';
-        buttons.appendChild(serverBtn);
-    }
+    buttons.appendChild(createDownloadButton(tuiAsset, 'tui', 'TUI', 'Terminal User Interface'));
+    buttons.appendChild(createDownloadButton(guiAsset, 'gui', 'GUI', 'Graphical User Interface'));
+    buttons.appendChild(createDownloadButton(serverAsset, 'server', 'Server', 'Server binary'));
 
     card.appendChild(platformName);
     card.appendChild(archName);
@@ -77,11 +81,12 @@ async function populateDownloads() {
     const cards = [];
 
     for (const platform of PLATFORMS) {
-        const clientAsset = release.assets.find(a => platform.clientPattern.test(a.name));
+        const tuiAsset = release.assets.find(a => platform.tuiPattern && platform.tuiPattern.test(a.name));
+        const guiAsset = release.assets.find(a => platform.guiPattern && platform.guiPattern.test(a.name));
         const serverAsset = release.assets.find(a => platform.serverPattern.test(a.name));
 
-        if (clientAsset || serverAsset) {
-            cards.push(createDownloadCard(platform, clientAsset, serverAsset));
+        if (tuiAsset || guiAsset || serverAsset) {
+            cards.push(createDownloadCard(platform, tuiAsset, guiAsset, serverAsset));
         }
     }
 
