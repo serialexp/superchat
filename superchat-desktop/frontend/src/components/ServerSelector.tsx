@@ -1,7 +1,8 @@
 // Server Selector Component
 // Full-featured server selection screen with status probing and throttling
 
-import { Component, createSignal, For, Show, onMount, createEffect } from 'solid-js'
+import { Component, createSignal, For, Show, onMount, onCleanup, createEffect } from 'solid-js'
+import { createStore } from 'solid-js/store'
 
 export interface Server {
   name: string
@@ -28,16 +29,86 @@ const THROTTLE_OPTIONS = [
 ]
 
 const ServerSelector: Component<ServerSelectorProps> = (props) => {
-  const [servers, setServers] = createSignal<Server[]>([])
+  const [servers, setServers] = createStore<Server[]>([])
   const [selectedIndex, setSelectedIndex] = createSignal(-1)
   const [nickname, setNickname] = createSignal('')
   const [customUrl, setCustomUrl] = createSignal('')
   const [throttleSpeed, setThrottleSpeed] = createSignal(0)
   const [errorMessage, setErrorMessage] = createSignal('')
+  const [serverListFocused, setServerListFocused] = createSignal(true) // Start focused on server list
 
   onMount(() => {
     initializeServers()
+    window.addEventListener('keydown', handleKeyDown)
   })
+
+  onCleanup(() => {
+    window.removeEventListener('keydown', handleKeyDown)
+  })
+
+  // Keyboard navigation handler
+  const handleKeyDown = (e: KeyboardEvent) => {
+    const target = e.target as HTMLElement
+    const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT'
+
+    // Let inputs handle their own events, except Escape
+    if (isInput) {
+      setServerListFocused(false)
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        target.blur()
+        setServerListFocused(true)
+      }
+      return
+    }
+
+    // Not in an input, so we're focused on server list
+    setServerListFocused(true)
+
+    switch (e.key) {
+      case 'ArrowUp':
+      case 'k':
+        e.preventDefault()
+        navigateServers(-1)
+        break
+      case 'ArrowDown':
+      case 'j':
+        e.preventDefault()
+        navigateServers(1)
+        break
+      case 'Enter':
+        e.preventDefault()
+        if (selectedIndex() >= 0) {
+          // Server already selected, try to connect
+          handleConnect(e as unknown as Event)
+        } else {
+          // No server selected, select first one
+          handleServerClick(0)
+        }
+        break
+    }
+  }
+
+  // Navigate through server list
+  const navigateServers = (delta: number) => {
+    const serverList = servers
+    if (serverList.length === 0) return
+
+    const current = selectedIndex()
+    let newIndex: number
+
+    if (current === -1) {
+      // Nothing selected, start at first or last depending on direction
+      newIndex = delta > 0 ? 0 : serverList.length - 1
+    } else {
+      // Wrap around navigation
+      newIndex = current + delta
+      if (newIndex < 0) newIndex = serverList.length - 1
+      if (newIndex >= serverList.length) newIndex = 0
+    }
+
+    handleServerClick(newIndex)
+  }
 
   const initializeServers = () => {
     const hostname = window.location.hostname || 'localhost'
@@ -78,10 +149,15 @@ const ServerSelector: Component<ServerSelectorProps> = (props) => {
     setServers(initialServers)
     loadFromLocalStorage()
     checkServerStatus()
+
+    // Auto-select first server if none selected (and no saved selection)
+    if (selectedIndex() === -1 && initialServers.length > 0) {
+      handleServerClick(0)
+    }
   }
 
   const checkServerStatus = async () => {
-    const serverList = servers()
+    const serverList = servers
     for (let i = 0; i < serverList.length - 1; i++) { // Skip custom server
       const server = serverList[i]
 
@@ -123,14 +199,9 @@ const ServerSelector: Component<ServerSelectorProps> = (props) => {
       }
 
       // Update server status based on probe results
-      setServers(prev => {
-        const updated = [...prev]
-        updated[i] = {
-          ...updated[i],
-          status: isOnline ? 'online' : 'offline',
-          isSecure: secureWorks
-        }
-        return updated
+      setServers(i, {
+        status: isOnline ? 'online' : 'offline',
+        isSecure: secureWorks
       })
     }
   }
@@ -144,21 +215,17 @@ const ServerSelector: Component<ServerSelectorProps> = (props) => {
     const savedServerIndex = localStorage.getItem('superchat_server_index')
     if (savedServerIndex !== null) {
       const index = parseInt(savedServerIndex, 10)
-      if (index >= 0 && index < servers().length) {
+      if (index >= 0 && index < servers.length) {
         setSelectedIndex(index)
 
         // Restore isSecure flag
         const savedServerSecure = localStorage.getItem('superchat_server_secure')
         if (savedServerSecure !== null) {
-          setServers(prev => {
-            const updated = [...prev]
-            updated[index] = { ...updated[index], isSecure: savedServerSecure === 'true' }
-            return updated
-          })
+          setServers(index, 'isSecure', savedServerSecure === 'true')
         }
 
         // Restore custom URL if it was custom server
-        if (index === servers().length - 1) {
+        if (index === servers.length - 1) {
           const savedCustomUrl = localStorage.getItem('superchat_custom_url')
           if (savedCustomUrl) {
             setCustomUrl(savedCustomUrl)
@@ -175,10 +242,10 @@ const ServerSelector: Component<ServerSelectorProps> = (props) => {
 
   const handleServerClick = (index: number) => {
     setSelectedIndex(index)
-    const server = servers()[index]
+    const server = servers[index]
 
     // For non-custom servers, populate the URL
-    if (index < servers().length - 1) {
+    if (index < servers.length - 1) {
       const url = server.isSecure ? server.wssUrl : server.wsUrl
       setCustomUrl(url)
     } else {
@@ -189,15 +256,11 @@ const ServerSelector: Component<ServerSelectorProps> = (props) => {
   }
 
   const toggleSecure = (index: number) => {
-    setServers(prev => {
-      const updated = [...prev]
-      updated[index] = { ...updated[index], isSecure: !updated[index].isSecure }
-      return updated
-    })
+    setServers(index, 'isSecure', (prev) => !prev)
 
     // Update URL display
-    const server = servers()[index]
-    if (index < servers().length - 1) {
+    const server = servers[index]
+    if (index < servers.length - 1) {
       const url = server.isSecure ? server.wssUrl : server.wsUrl
       setCustomUrl(url)
     }
@@ -216,10 +279,10 @@ const ServerSelector: Component<ServerSelectorProps> = (props) => {
       return
     }
 
-    const server = servers()[selectedIndex()]
+    const server = servers[selectedIndex()]
     let finalUrl = ''
 
-    if (selectedIndex() === servers().length - 1) {
+    if (selectedIndex() === servers.length - 1) {
       // Custom server
       finalUrl = customUrl().trim()
       if (!finalUrl) {
@@ -237,7 +300,7 @@ const ServerSelector: Component<ServerSelectorProps> = (props) => {
     localStorage.setItem('superchat_server_secure', server.isSecure.toString())
     localStorage.setItem('superchat_throttle_speed', throttleSpeed().toString())
 
-    if (selectedIndex() === servers().length - 1) {
+    if (selectedIndex() === servers.length - 1) {
       localStorage.setItem('superchat_custom_url', customUrl())
     }
 
@@ -247,8 +310,8 @@ const ServerSelector: Component<ServerSelectorProps> = (props) => {
   // Update URL display when server or secure toggle changes
   createEffect(() => {
     const index = selectedIndex()
-    if (index >= 0 && index < servers().length - 1) {
-      const server = servers()[index]
+    if (index >= 0 && index < servers.length - 1) {
+      const server = servers[index]
       const url = server.isSecure ? server.wssUrl : server.wsUrl
       setCustomUrl(url)
     }
@@ -271,13 +334,15 @@ const ServerSelector: Component<ServerSelectorProps> = (props) => {
           <fieldset class="fieldset mb-4">
             <legend class="fieldset-legend">Available Servers</legend>
             <div class="space-y-2">
-              <For each={servers()}>
+              <For each={servers}>
                 {(server, index) => (
                   <div
                     onClick={() => handleServerClick(index())}
                     class={`flex items-center p-3 rounded-lg border-2 cursor-pointer transition-all ${
                       selectedIndex() === index()
-                        ? 'border-primary bg-primary/10'
+                        ? serverListFocused()
+                          ? 'border-primary bg-primary/10 ring-2 ring-primary ring-offset-2 ring-offset-base-200'
+                          : 'border-primary bg-primary/10'
                         : 'border-base-300 hover:border-primary/50 hover:bg-base-300'
                     }`}
                   >
@@ -303,7 +368,7 @@ const ServerSelector: Component<ServerSelectorProps> = (props) => {
                     </div>
 
                     {/* WS/WSS Toggle (for non-custom servers) */}
-                    <Show when={index() < servers().length - 1}>
+                    <Show when={index() < servers.length - 1}>
                       <button
                         onClick={(e) => {
                           e.stopPropagation()
@@ -324,19 +389,18 @@ const ServerSelector: Component<ServerSelectorProps> = (props) => {
 
           {/* Connection Form */}
           <form onSubmit={handleConnect}>
-            {/* Custom URL (only visible for custom server) */}
-            <Show when={selectedIndex() === servers().length - 1}>
-              <fieldset class="fieldset mb-4">
-                <legend class="fieldset-legend">Server URL</legend>
-                <input
-                  type="text"
-                  value={customUrl()}
-                  onInput={(e) => setCustomUrl(e.currentTarget.value)}
-                  placeholder="ws://localhost:8080/ws or wss://localhost:8080/ws"
-                  class="input w-full"
-                />
-              </fieldset>
-            </Show>
+            {/* Custom URL - always visible but disabled unless custom server selected */}
+            <fieldset class="fieldset mb-4">
+              <legend class="fieldset-legend">Server URL</legend>
+              <input
+                type="text"
+                value={customUrl()}
+                onInput={(e) => setCustomUrl(e.currentTarget.value)}
+                placeholder="ws://localhost:8080/ws or wss://..."
+                class={`input w-full ${selectedIndex() !== servers.length - 1 ? 'input-disabled opacity-50' : ''}`}
+                disabled={selectedIndex() !== servers.length - 1}
+              />
+            </fieldset>
 
             {/* Nickname */}
             <fieldset class="fieldset mb-4">
@@ -373,10 +437,24 @@ const ServerSelector: Component<ServerSelectorProps> = (props) => {
               type="submit"
               class="btn btn-primary w-full"
               disabled={!nickname().trim() || selectedIndex() === -1}
+              onKeyDown={(e) => {
+                if (e.key === 'Tab' && !e.shiftKey) {
+                  e.preventDefault()
+                  e.currentTarget.blur()
+                  setServerListFocused(true)
+                }
+              }}
             >
               Connect
             </button>
           </form>
+
+          {/* Keyboard hints footer */}
+          <div class="mt-4 pt-3 border-t border-base-300 text-center">
+            <span class="text-xs text-base-content/50 font-mono">
+              [↑↓/JK] Navigate  [Enter] Select  [Tab] Form fields
+            </span>
+          </div>
         </div>
       </div>
     </div>
