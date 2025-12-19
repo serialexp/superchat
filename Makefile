@@ -1,17 +1,17 @@
 .PHONY: test coverage coverage-html coverage-lcov coverage-protocol coverage-summary fuzz clean build build-desktop build-gui-legacy run-server run-client run-website website docker-build docker-build-push docker-build-server docker-build-website docker-run docker-push docker-stop
 
-# Run all tests
+# Run all tests (excludes GUI client which requires system dependencies)
 test:
-	go test ./... -race
+	go test $$(go list ./... | grep -v /cmd/client-gui) -race
 
 # Generate coverage for all packages (combined)
 coverage:
-	go test ./... -coverprofile=coverage.out -covermode=atomic
+	go test $$(go list ./... | grep -v /cmd/client-gui) -coverprofile=coverage.out -covermode=atomic
 	go tool cover -func=coverage.out
 
 # Generate HTML coverage report (combined)
 coverage-html:
-	go test ./... -coverprofile=coverage.out -covermode=atomic
+	go test $$(go list ./... | grep -v /cmd/client-gui) -coverprofile=coverage.out -covermode=atomic
 	go tool cover -html=coverage.out -o coverage.html
 	@echo "Coverage report generated: coverage.html"
 
