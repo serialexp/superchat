@@ -167,7 +167,7 @@ func (m *DMRequestModal) Render(width, height int) string {
 	if m.fromUserID != nil {
 		desc = fmt.Sprintf("%s wants to start a direct message.", m.fromNickname)
 	} else {
-		desc = fmt.Sprintf("%s (anonymous) wants to start a direct message.", m.fromNickname)
+		desc = fmt.Sprintf("~%s wants to start a direct message.", m.fromNickname)
 	}
 
 	// Add encryption status note

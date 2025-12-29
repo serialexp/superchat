@@ -37,6 +37,7 @@ const (
 	ModalCreateSubchannel
 	ModalDMRequest
 	ModalEncryptionSetup
+	ModalStartDM
 )
 
 // String returns the string representation of the modal type
@@ -100,6 +101,8 @@ func (m ModalType) String() string {
 		return "DMRequest"
 	case ModalEncryptionSetup:
 		return "EncryptionSetup"
+	case ModalStartDM:
+		return "StartDM"
 	default:
 		return "Unknown"
 	}
@@ -203,6 +206,16 @@ func (ms *ModalStack) IsEmpty() bool {
 // Size returns the number of modals in the stack
 func (ms *ModalStack) Size() int {
 	return len(ms.stack)
+}
+
+// HasType returns true if a modal of the given type exists in the stack
+func (ms *ModalStack) HasType(t ModalType) bool {
+	for _, m := range ms.stack {
+		if m.Type() == t {
+			return true
+		}
+	}
+	return false
 }
 
 // ForEach calls the given function for each modal in the stack (bottom to top)

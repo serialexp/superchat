@@ -127,19 +127,22 @@ func (m *EncryptionSetupModal) handleSelection() (bool, Modal, tea.Cmd) {
 	switch action {
 	case "generate":
 		if m.onGenerate != nil {
-			return true, nil, m.onGenerate()
+			// Keep modal open while action runs - it will be closed when complete
+			return true, m, m.onGenerate()
 		}
 	case "ssh":
 		if m.onUseSSH != nil {
-			return true, nil, m.onUseSSH()
+			// Keep modal open while action runs - it will be closed when complete
+			return true, m, m.onUseSSH()
 		}
 	case "skip":
 		if m.onSkip != nil {
+			// Skip closes immediately (no async action)
 			return true, nil, m.onSkip()
 		}
 	}
 
-	return true, nil, nil
+	return true, m, nil
 }
 
 func (m *EncryptionSetupModal) cursorToAction() string {

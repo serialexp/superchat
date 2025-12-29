@@ -10,6 +10,7 @@ import (
 
 	"github.com/aeolun/superchat/pkg/client"
 	"github.com/aeolun/superchat/pkg/client/assets"
+	"github.com/aeolun/superchat/pkg/client/crypto"
 	"github.com/aeolun/superchat/pkg/client/ui/commands"
 	"github.com/aeolun/superchat/pkg/client/ui/modal"
 	"github.com/aeolun/superchat/pkg/protocol"
@@ -65,15 +66,16 @@ type presenceEntry struct {
 
 // DMChannel represents an active DM channel
 type DMChannel struct {
-	ChannelID     uint64
-	OtherUserID   *uint64 // nil if other party is anonymous
-	OtherNickname string
-	IsEncrypted   bool
-	OtherPubKey   []byte // Other party's X25519 public key (for encrypted DMs)
-	UnreadCount   uint32
+	ChannelID       uint64
+	OtherUserID     *uint64 // nil if other party is anonymous
+	OtherNickname   string
+	IsEncrypted     bool
+	OtherPubKey     []byte // Other party's X25519 public key (for encrypted DMs)
+	UnreadCount     uint32
+	ParticipantLeft bool // True if the other participant has permanently left
 }
 
-// DMInvite represents a pending DM request
+// DMInvite represents an incoming pending DM request (from someone else)
 type DMInvite struct {
 	ChannelID        uint64
 	FromUserID       *uint64 // nil if initiator is anonymous
@@ -81,11 +83,19 @@ type DMInvite struct {
 	EncryptionStatus uint8 // 0=not possible, 1=required, 2=optional (see protocol.DMEncryption*)
 }
 
+// OutgoingDMInvite represents a DM we initiated that's waiting for acceptance
+type OutgoingDMInvite struct {
+	InviteID   uint64  // The invite/channel ID from DM_PENDING
+	ToUserID   *uint64 // nil if target is anonymous
+	ToNickname string
+}
+
 // Model represents the application state
 type Model struct {
 	// Connection and state
 	conn             client.ConnectionInterface
 	state            client.StateInterface
+	keyStore         *crypto.KeyStore
 	connectionState  ConnectionState
 	reconnectAttempt int
 	switchingMethod  bool   // True when user is trying a different connection method
@@ -181,6 +191,7 @@ type Model struct {
 	// Error and status
 	errorMessage           string
 	statusMessage          string
+	statusVersion          uint64 // Incremented each time statusMessage is set, for timeout tracking
 	serverDisconnectReason string // Reason provided by server in DISCONNECT message
 	showHelp               bool
 	firstRun               bool
@@ -214,9 +225,10 @@ type Model struct {
 	threadHighestMessageID map[uint64]uint64             // Highest message ID seen per thread
 
 	// Direct Messages (V3)
-	dmChannels        []DMChannel          // Active DM channels
-	pendingDMInvites  []DMInvite           // Incoming DM requests awaiting response
-	dmChannelKeys     map[uint64][]byte    // channelID -> derived AES key for encryption
+	dmChannels         []DMChannel          // Active DM channels
+	pendingDMInvites   []DMInvite           // Incoming DM requests awaiting response
+	outgoingDMInvites  []OutgoingDMInvite   // Outgoing DM requests we're waiting on
+	dmChannelKeys      map[uint64][]byte    // channelID -> derived AES key for encryption
 	encryptionKeyPub  []byte               // Our X25519 public key (nil if not set up)
 	encryptionKeyPriv []byte               // Our X25519 private key (nil if not set up)
 	dmCursor          int                  // Cursor position in DM list
@@ -266,6 +278,7 @@ func NewModel(conn client.ConnectionInterface, state client.StateInterface, curr
 	m := Model{
 		conn:                   conn,
 		state:                  state,
+		keyStore:               crypto.NewKeyStore(state.GetStateDir()),
 		connectionState:        StateConnected, // Always connected (either to directory or chat server)
 		reconnectAttempt:       0,
 		directoryMode:          directoryMode,
@@ -345,7 +358,8 @@ func (m *Model) registerCommands() {
 		Global().
 		InModals(modal.ModalNone). // Only available when no modal is open
 		Do(func(i interface{}) (interface{}, tea.Cmd) {
-			return i, tea.Quit
+			model := i.(*Model)
+			return model, model.saveAndQuit()
 		}).
 		Priority(900).
 		Build())
@@ -596,6 +610,25 @@ func (m *Model) registerCommands() {
 		Priority(45). // Lower priority than delete (40)
 		Build())
 
+	// Start DM with any online user
+	m.commands.Register(commands.NewCommand().
+		Keys("ctrl+d").
+		Name("New DM").
+		Help("Start a DM with any online user").
+		Global().
+		When(func(i interface{}) bool {
+			model := i.(*Model)
+			// Need to have a nickname set and be connected
+			return model.nickname != "" && model.conn != nil
+		}).
+		Do(func(i interface{}) (interface{}, tea.Cmd) {
+			model := i.(*Model)
+			model.showStartDMModal()
+			return model, nil
+		}).
+		Priority(10).
+		Build())
+
 	// Back to thread list
 	m.commands.Register(commands.NewCommand().
 		Keys("esc").
@@ -775,7 +808,7 @@ func (m *Model) registerCommands() {
 			var cmd tea.Cmd
 			if model.currentChannel != nil {
 				cmd = tea.Batch(
-					model.sendLeaveChannel(model.currentChannel.ID),
+					model.sendLeaveChannel(model.currentChannel.ID, false),
 					model.sendUnsubscribeChannel(model.currentChannel.ID),
 				)
 				model.clearActiveChannel()
@@ -802,7 +835,7 @@ func (m *Model) registerCommands() {
 			var cmd tea.Cmd
 			if model.currentChannel != nil {
 				cmd = tea.Batch(
-					model.sendLeaveChannel(model.currentChannel.ID),
+					model.sendLeaveChannel(model.currentChannel.ID, false),
 					model.sendUnsubscribeChannel(model.currentChannel.ID),
 				)
 				model.clearActiveChannel()
@@ -842,7 +875,8 @@ func (m *Model) registerCommands() {
 		InViews(int(ViewChannelList)).
 		Do(func(i interface{}) (interface{}, tea.Cmd) {
 			model := i.(*Model)
-			if model.channelCursor < len(model.channels)-1 {
+			maxIndex := model.getVisibleChannelListItemCount() - 1
+			if model.channelCursor < maxIndex {
 				model.channelCursor++
 			}
 			return model, nil
@@ -850,52 +884,8 @@ func (m *Model) registerCommands() {
 		Priority(10).
 		Build())
 
-	// Select channel
-	m.commands.Register(commands.NewCommand().
-		Keys("enter").
-		Name("Select").
-		Help("Select the channel").
-		InViews(int(ViewChannelList)).
-		Do(func(i interface{}) (interface{}, tea.Cmd) {
-			model := i.(*Model)
-			if model.channelCursor < len(model.channels) {
-				selectedChannel := model.channels[model.channelCursor]
-				model.currentChannel = &selectedChannel
-
-				// Check channel type and route to appropriate view
-				if selectedChannel.Type == 0 {
-					// Chat channel (type 0) - go to chat view
-					model.currentView = ViewChatChannel
-					model.loadingChat = true
-					model.chatMessages = []protocol.Message{} // Clear chat messages
-					model.chatTextarea.Reset()                // Clear textarea
-					model.chatTextarea.Focus()                // Focus textarea for immediate typing
-					model.chatViewport.SetContent(model.buildChatMessages())
-					return model, tea.Batch(
-						model.sendJoinChannel(selectedChannel.ID),
-						model.requestChatMessages(selectedChannel.ID),
-						model.sendSubscribeChannel(selectedChannel.ID),
-						textarea.Blink, // Start cursor blinking
-					)
-				} else {
-					// Forum channel (type 1) - go to thread list view
-					model.currentView = ViewThreadList
-					model.loadingMore = false
-					model.allThreadsLoaded = false
-					model.loadingThreadList = true
-					model.threads = []protocol.Message{}                                // Clear threads
-					model.threadListViewport.SetContent(model.buildThreadListContent()) // Show initial spinner
-					return model, tea.Batch(
-						model.sendJoinChannel(selectedChannel.ID),
-						model.requestThreadList(selectedChannel.ID),
-						model.sendSubscribeChannel(selectedChannel.ID),
-					)
-				}
-			}
-			return model, nil
-		}).
-		Priority(50).
-		Build())
+	// NOTE: "enter" key handling for channel list is in update.go handleChannelListKeys()
+	// It uses getChannelListItemAtCursor() to properly handle DMs, channels, and pending invites
 
 	// Refresh channel list
 	m.commands.Register(commands.NewCommand().
@@ -991,20 +981,19 @@ func (m *Model) registerCommands() {
 		Priority(10).
 		Build())
 
-	// Ctrl+N to change nickname
+	// Ctrl+N to set or change nickname
 	m.commands.Register(commands.NewCommand().
 		Keys("ctrl+n").
-		Name("Change Nick").
-		Help("Change nickname").
+		Name("Nickname").
+		Help("Set or change nickname").
 		Global().
-		When(func(i interface{}) bool {
-			model := i.(*Model)
-			// Allow nickname change when user has a nickname set
-			return model.nickname != ""
-		}).
 		Do(func(i interface{}) (interface{}, tea.Cmd) {
 			model := i.(*Model)
-			model.showNicknameChangeModal()
+			if model.nickname == "" {
+				model.showNicknameSetupModal()
+			} else {
+				model.showNicknameChangeModal()
+			}
 			return model, nil
 		}).
 		Priority(10).
@@ -1379,10 +1368,50 @@ func (m *Model) showRegistrationWarningModal(onProceed func() tea.Cmd) {
 	m.modalStack.Push(registrationWarningModal)
 }
 
+// showStartDMModal displays the modal to start a DM with any online user
+func (m *Model) showStartDMModal() {
+	// Convert serverRoster to OnlineUser slice
+	users := make([]modal.OnlineUser, 0, len(m.serverRoster))
+	for _, entry := range m.serverRoster {
+		users = append(users, modal.OnlineUser{
+			SessionID:    entry.SessionID,
+			Nickname:     entry.Nickname,
+			IsRegistered: entry.IsRegistered,
+			UserID:       entry.UserID,
+		})
+	}
+
+	startDMModal := modal.NewStartDMModal(
+		users,
+		m.selfSessionID,
+		func(userID *uint64, nickname string) tea.Cmd {
+			// Return a message to trigger the DM flow in Update
+			return func() tea.Msg {
+				return StartDMSelectedMsg{
+					UserID:   userID,
+					Nickname: nickname,
+				}
+			}
+		},
+	)
+	m.modalStack.Push(startDMModal)
+}
+
+// StartDMSelectedMsg is sent when user selects someone to DM from the modal
+type StartDMSelectedMsg struct {
+	UserID   *uint64
+	Nickname string
+}
+
 // shouldShowRegistrationWarning returns true if we should show the registration warning
 func (m *Model) shouldShowRegistrationWarning() bool {
 	// Don't show if user is authenticated (registered)
 	if m.authState == AuthStateAuthenticated && m.userID != nil {
+		return false
+	}
+
+	// Don't show for DM channels - privacy warning doesn't apply to private chats
+	if m.currentChannel != nil && m.isCurrentChannelDM() {
 		return false
 	}
 
@@ -1397,6 +1426,19 @@ func (m *Model) shouldShowRegistrationWarning() bool {
 	}
 
 	return true
+}
+
+// isCurrentChannelDM returns true if the current channel is a DM channel
+func (m *Model) isCurrentChannelDM() bool {
+	if m.currentChannel == nil {
+		return false
+	}
+	for _, dm := range m.dmChannels {
+		if dm.ChannelID == m.currentChannel.ID {
+			return true
+		}
+	}
+	return false
 }
 
 // Admin modal helper methods
@@ -1739,8 +1781,9 @@ func (m *Model) clearActiveChannel() {
 }
 
 // startDMWithUser initiates a DM with the specified user
+// Shows encryption setup modal first if user doesn't have encryption set up
 func (m *Model) startDMWithUser(userID *uint64, nickname string) (*Model, tea.Cmd) {
-	// Determine target type and send START_DM
+	// Determine target type
 	var targetType uint8
 	var targetUserID uint64
 
@@ -1753,12 +1796,168 @@ func (m *Model) startDMWithUser(userID *uint64, nickname string) (*Model, tea.Cm
 		targetType = protocol.DMTargetByNickname
 	}
 
-	m.statusMessage = fmt.Sprintf("Starting DM with %s...", nickname)
+	// Show encryption setup modal first
+	m.showDMEncryptionChoiceModal(targetType, targetUserID, nickname)
+	return m, nil
+}
 
-	// For now, allow unencrypted DMs (TODO: check if we have encryption key)
-	allowUnencrypted := true
+// showDMEncryptionChoiceModal shows the encryption setup modal before starting a DM
+func (m *Model) showDMEncryptionChoiceModal(targetType uint8, targetUserID uint64, nickname string) {
+	// Check if user has SSH key (authenticated via SSH)
+	hasSSHKey := m.userID != nil && m.authState == AuthStateAuthenticated
 
-	return m, m.sendStartDM(targetType, targetUserID, nickname, allowUnencrypted)
+	// Check if we already have an encryption key
+	hasExistingKey := m.encryptionKeyPub != nil
+
+	encModal := modal.NewEncryptionSetupModal(modal.EncryptionSetupConfig{
+		DMChannelID:    nil, // Not created yet
+		Reason:         fmt.Sprintf("Set up encryption to chat securely with %s.", nickname),
+		HasSSHKey:      hasSSHKey,
+		HasExistingKey: hasExistingKey,
+		CanSkip:        true, // Allow unencrypted DMs
+		OnGenerate: func() tea.Cmd {
+			// Generate key, then start DM
+			return m.generateKeyAndStartDM(targetType, targetUserID, nickname)
+		},
+		OnUseSSH: func() tea.Cmd {
+			// Derive from SSH, then start DM
+			return m.deriveKeyFromSSHAndStartDM(targetType, targetUserID, nickname)
+		},
+		OnSkip: func() tea.Cmd {
+			// Start unencrypted DM
+			m.statusMessage = fmt.Sprintf("Starting DM with %s...", nickname)
+			return m.sendStartDM(targetType, targetUserID, nickname, true)
+		},
+		OnCancel: func() tea.Cmd {
+			return nil
+		},
+	})
+	m.modalStack.Push(encModal)
+}
+
+// generateKeyAndStartDM generates a new encryption key and then starts the DM
+func (m *Model) generateKeyAndStartDM(targetType uint8, targetUserID uint64, nickname string) tea.Cmd {
+	return func() tea.Msg {
+		// Generate new key pair
+		kp, err := crypto.GenerateX25519KeyPair()
+		if err != nil {
+			return ErrorMsg{Err: fmt.Errorf("failed to generate encryption key: %w", err)}
+		}
+
+		// Determine key type based on user registration status
+		// Anonymous users can only use ephemeral (session-only) keys
+		var keyType uint8 = protocol.KeyTypeGenerated
+		label := "generated"
+		if m.userID == nil {
+			keyType = protocol.KeyTypeEphemeral
+			label = "ephemeral"
+		}
+
+		// Send public key to server
+		msg := &protocol.ProvidePublicKeyMessage{
+			KeyType:   keyType,
+			PublicKey: kp.PublicKey,
+			Label:     label,
+		}
+		if err := m.conn.SendMessage(protocol.TypeProvidePublicKey, msg); err != nil {
+			return ErrorMsg{Err: err}
+		}
+
+		// Return message that will update state and trigger DM start
+		return DMKeyGeneratedStartMsg{
+			PublicKey:    kp.PublicKey,
+			PrivateKey:   kp.PrivateKey,
+			TargetType:   targetType,
+			TargetUserID: targetUserID,
+			Nickname:     nickname,
+		}
+	}
+}
+
+// deriveKeyFromSSHAndStartDM derives encryption key from SSH and then starts the DM
+func (m *Model) deriveKeyFromSSHAndStartDM(targetType uint8, targetUserID uint64, nickname string) tea.Cmd {
+	return func() tea.Msg {
+		// TODO: Access SSH private key and derive X25519 key
+		// This requires access to the SSH agent or key file
+		// For now, return an error
+		return ErrorMsg{Err: fmt.Errorf("SSH key derivation not yet implemented")}
+	}
+}
+
+// DMKeyGeneratedStartMsg is sent when encryption key is generated and DM should start
+type DMKeyGeneratedStartMsg struct {
+	PublicKey    [32]byte
+	PrivateKey   [32]byte
+	TargetType   uint8
+	TargetUserID uint64
+	Nickname     string
+}
+
+// persistEncryptionKey saves the encryption key to disk for future sessions.
+// For registered users, keys are stored by userID.
+// For anonymous users, keys are stored by nickname.
+func (m *Model) persistEncryptionKey(privateKey []byte) {
+	if m.keyStore == nil {
+		return
+	}
+
+	serverHost := m.conn.GetAddress()
+
+	var err error
+	if m.userID != nil {
+		// Registered user - store by userID
+		err = m.keyStore.SaveKey(serverHost, *m.userID, privateKey)
+	} else if m.nickname != "" {
+		// Anonymous user - store by nickname
+		err = m.keyStore.SaveAnonKey(serverHost, m.nickname, privateKey)
+	}
+
+	if err != nil && m.logger != nil {
+		m.logger.Printf("Failed to persist encryption key: %v", err)
+	}
+}
+
+// loadEncryptionKey loads any stored encryption key from disk.
+// Returns true if a key was loaded successfully.
+func (m *Model) loadEncryptionKey() bool {
+	if m.keyStore == nil {
+		return false
+	}
+
+	serverHost := m.conn.GetAddress()
+
+	var privateKey []byte
+	var err error
+
+	if m.userID != nil {
+		// Registered user - load by userID
+		privateKey, err = m.keyStore.LoadKey(serverHost, *m.userID)
+	} else if m.nickname != "" {
+		// Anonymous user - load by nickname
+		privateKey, err = m.keyStore.LoadAnonKey(serverHost, m.nickname)
+	} else {
+		return false
+	}
+
+	if err != nil {
+		if m.logger != nil && err != crypto.ErrKeyNotFound {
+			m.logger.Printf("Failed to load encryption key: %v", err)
+		}
+		return false
+	}
+
+	// Derive public key from private key
+	publicKey, err := crypto.X25519PrivateToPublic(privateKey)
+	if err != nil {
+		if m.logger != nil {
+			m.logger.Printf("Failed to derive public key: %v", err)
+		}
+		return false
+	}
+
+	m.encryptionKeyPriv = privateKey
+	m.encryptionKeyPub = publicKey
+	return true
 }
 
 // showComposeWithWarning shows the compose modal, potentially with registration warning first
@@ -1782,19 +1981,22 @@ const (
 	ChannelListItemChannel ChannelListItemType = iota
 	ChannelListItemSubchannel
 	ChannelListItemDM
+	ChannelListItemOutgoingDM
 	ChannelListItemPendingDM
 )
 
 // ChannelListItem represents an item in the channel list (channel, subchannel, DM, or pending invite)
 type ChannelListItem struct {
-	Type         ChannelListItemType
-	ChannelIndex int                      // Index into m.channels (for channels)
-	Channel      *protocol.Channel        // The channel (for channels or parent for subchannels)
-	Subchannel   *protocol.SubchannelInfo // The subchannel (nil for channels)
-	DM           *DMChannel               // The DM channel (for DMs)
-	DMIndex      int                      // Index into m.dmChannels
-	PendingDM    *DMInvite                // The pending DM invite
-	PendingIndex int                      // Index into m.pendingDMInvites
+	Type          ChannelListItemType
+	ChannelIndex  int                      // Index into m.channels (for channels)
+	Channel       *protocol.Channel        // The channel (for channels or parent for subchannels)
+	Subchannel    *protocol.SubchannelInfo // The subchannel (nil for channels)
+	DM            *DMChannel               // The DM channel (for DMs)
+	DMIndex       int                      // Index into m.dmChannels
+	OutgoingDM    *OutgoingDMInvite        // The outgoing DM invite we're waiting on
+	OutgoingIndex int                      // Index into m.outgoingDMInvites
+	PendingDM     *DMInvite                // The pending DM invite (incoming)
+	PendingIndex  int                      // Index into m.pendingDMInvites
 }
 
 // IsChannel returns true if this is a regular channel
@@ -1804,8 +2006,9 @@ func (i *ChannelListItem) IsChannel() bool {
 
 // getVisibleChannelListItemCount returns the total number of visible items in the channel list
 func (m *Model) getVisibleChannelListItemCount() int {
-	count := len(m.dmChannels) // DMs at the top
-	count += len(m.channels)   // Regular channels
+	count := len(m.dmChannels)        // Active DMs at the top
+	count += len(m.outgoingDMInvites) // Outgoing invites (waiting)
+	count += len(m.channels)          // Regular channels
 	if m.expandedChannelID != nil {
 		// Add subchannels for the expanded channel
 		count += len(m.subchannels)
@@ -1834,7 +2037,20 @@ func (m *Model) getChannelListItemAtCursor() *ChannelListItem {
 		flatIndex++
 	}
 
-	// Second: Regular channels
+	// Second: Outgoing DM invites (waiting for acceptance)
+	for i := range m.outgoingDMInvites {
+		if flatIndex == m.channelCursor {
+			invite := m.outgoingDMInvites[i]
+			return &ChannelListItem{
+				Type:          ChannelListItemOutgoingDM,
+				OutgoingDM:    &invite,
+				OutgoingIndex: i,
+			}
+		}
+		flatIndex++
+	}
+
+	// Third: Regular channels
 	for i, channel := range m.channels {
 		if flatIndex == m.channelCursor {
 			ch := channel // Copy to avoid referencing loop variable
@@ -1879,7 +2095,7 @@ func (m *Model) getChannelListItemAtCursor() *ChannelListItem {
 		}
 	}
 
-	// Third: Pending DM invites at the bottom
+	// Fourth: Pending DM invites at the bottom (incoming)
 	for i := range m.pendingDMInvites {
 		if flatIndex == m.channelCursor {
 			invite := m.pendingDMInvites[i]
@@ -1900,6 +2116,12 @@ func (m *Model) getChannelListItemAtCursor() *ChannelListItem {
 // ServerFrameMsg wraps an incoming server frame
 type ServerFrameMsg struct {
 	Frame *protocol.Frame
+}
+
+// PostChatMessageMsg is sent when user confirms posting a chat message
+// (e.g., after dismissing registration warning modal)
+type PostChatMessageMsg struct {
+	Content string
 }
 
 // ErrorMsg represents an error
@@ -2028,4 +2250,13 @@ func checkForUpdates(currentVersion string) tea.Cmd {
 			UpdateAvailable: updateAvailable,
 		}
 	}
+}
+
+// saveAndQuit saves the last seen timestamp and returns a quit command
+func (m *Model) saveAndQuit() tea.Cmd {
+	// Save the current timestamp so anonymous users can get unread counts on next session
+	if err := m.state.UpdateLastSeenTimestamp(); err != nil && m.logger != nil {
+		m.logger.Printf("Failed to save last seen timestamp: %v", err)
+	}
+	return tea.Quit
 }

@@ -589,15 +589,19 @@ func truncateString(s string, maxLen int) string {
 
 // renderFooter renders the footer
 func (m Model) renderFooter(shortcuts string) string {
-	// Build footer content
-	footerContent := shortcuts
-
-	if m.statusMessage != "" {
-		footerContent += "  " + SuccessStyle.Render(m.statusMessage)
-	}
+	// Build footer content - status/error messages replace shortcuts entirely
+	// Error messages take highest priority (so errors aren't hidden by in-progress status)
+	var footerContent string
 
 	if m.errorMessage != "" {
-		footerContent += "  " + RenderError(m.errorMessage)
+		// Error message takes highest priority
+		footerContent = RenderError(m.errorMessage)
+	} else if m.statusMessage != "" {
+		// Status message takes priority over shortcuts
+		footerContent = SuccessStyle.Render(m.statusMessage)
+	} else {
+		// No status/error - show shortcuts
+		footerContent = shortcuts
 	}
 
 	// Truncate if too long (account for padding in FooterStyle)
@@ -697,7 +701,26 @@ func (m Model) buildChannelPaneContentString(availableWidth int) string {
 				items = append(items, label)
 				flatIndex++
 			}
-			items = append(items, "") // Spacing after DMs
+		}
+
+		// === Outgoing DM invites (waiting for acceptance) ===
+		if len(m.outgoingDMInvites) > 0 {
+			for _, invite := range m.outgoingDMInvites {
+				base := "⏳ " + invite.ToNickname
+				var label string
+				if flatIndex == m.channelCursor {
+					label = SelectedItemStyle.Render("▶ " + base)
+				} else {
+					label = MutedTextStyle.Render("  " + base)
+				}
+				items = append(items, label)
+				flatIndex++
+			}
+		}
+
+		// Add spacing before Channels section if we have DMs or outgoing invites
+		if len(m.dmChannels) > 0 || len(m.outgoingDMInvites) > 0 {
+			items = append(items, "")
 		}
 
 		// === Channels section ===
@@ -1287,6 +1310,15 @@ func (m Model) formatChatMessage(msg protocol.Message) string {
 	// Format timestamp (HH:MM)
 	timestamp := msg.CreatedAt.Format("15:04")
 	timeStyle := lipgloss.NewStyle().Foreground(MutedColor)
+
+	// Handle system messages (empty author)
+	if msg.AuthorNickname == "" {
+		// System message - render in muted italic style
+		systemStyle := lipgloss.NewStyle().
+			Foreground(MutedColor).
+			Italic(true)
+		return timeStyle.Render("["+timestamp+"]") + " " + systemStyle.Render(msg.Content)
+	}
 
 	// Format nickname with same styling as threaded view
 	nickname := msg.AuthorNickname

@@ -650,6 +650,8 @@ func (s *Server) handleMessage(sess *Session, frame *protocol.Frame) error {
 		return s.handleProvidePublicKey(sess, frame)
 	case protocol.TypeAllowUnencrypted:
 		return s.handleAllowUnencrypted(sess, frame)
+	case protocol.TypeDeclineDM:
+		return s.handleDeclineDM(sess, frame)
 
 	default:
 		// Unknown or unimplemented message type
@@ -660,9 +662,15 @@ func (s *Server) handleMessage(sess *Session, frame *protocol.Frame) error {
 func (s *Server) removeSession(sessionID uint64) {
 	sess, ok := s.sessions.GetSession(sessionID)
 	var joined *int64
+	var userID *int64
+	var dbSessionID int64
+	var nickname string
 	if ok {
 		sess.mu.RLock()
 		joined = sess.JoinedChannel
+		userID = sess.UserID
+		dbSessionID = sess.DBSessionID
+		nickname = sess.Nickname
 		sess.mu.RUnlock()
 	}
 
@@ -673,6 +681,9 @@ func (s *Server) removeSession(sessionID uint64) {
 			s.notifyChannelPresence(*joined, sess, false)
 		}
 		s.notifyServerPresence(sess, false)
+
+		// Notify DM participants that this user disconnected
+		s.notifyDMParticipantsOfDisconnect(userID, dbSessionID, nickname)
 	}
 }
 

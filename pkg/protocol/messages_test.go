@@ -1874,6 +1874,48 @@ func TestServerPresenceMessage(t *testing.T) {
 	assert.Equal(t, msg.Online, decoded.Online)
 }
 
+func TestDMParticipantLeftMessage(t *testing.T) {
+	t.Run("with user ID", func(t *testing.T) {
+		userID := uint64(42)
+		msg := DMParticipantLeftMessage{
+			DMChannelID: 12345,
+			UserID:      &userID,
+			Nickname:    "departing_user",
+		}
+
+		payload, err := msg.Encode()
+		require.NoError(t, err)
+
+		decoded := &DMParticipantLeftMessage{}
+		err = decoded.Decode(payload)
+		require.NoError(t, err)
+
+		assert.Equal(t, msg.DMChannelID, decoded.DMChannelID)
+		require.NotNil(t, decoded.UserID)
+		assert.Equal(t, *msg.UserID, *decoded.UserID)
+		assert.Equal(t, msg.Nickname, decoded.Nickname)
+	})
+
+	t.Run("without user ID (anonymous)", func(t *testing.T) {
+		msg := DMParticipantLeftMessage{
+			DMChannelID: 67890,
+			UserID:      nil,
+			Nickname:    "anonymous_user",
+		}
+
+		payload, err := msg.Encode()
+		require.NoError(t, err)
+
+		decoded := &DMParticipantLeftMessage{}
+		err = decoded.Decode(payload)
+		require.NoError(t, err)
+
+		assert.Equal(t, msg.DMChannelID, decoded.DMChannelID)
+		assert.Nil(t, decoded.UserID)
+		assert.Equal(t, msg.Nickname, decoded.Nickname)
+	})
+}
+
 func TestMessageTypeConstants(t *testing.T) {
 	// Test that message type constants have expected values
 	assert.Equal(t, 0x02, TypeSetNickname)
@@ -2756,6 +2798,85 @@ func TestDMRequestMessage(t *testing.T) {
 				assert.Equal(t, *tt.msg.FromUserID, *decoded.FromUserID)
 			} else {
 				assert.Nil(t, decoded.FromUserID)
+			}
+		})
+	}
+}
+
+func TestDeclineDMMessage(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  DeclineDMMessage
+	}{
+		{
+			name: "decline DM",
+			msg: DeclineDMMessage{
+				DMChannelID: 12345,
+			},
+		},
+		{
+			name: "decline DM with high channel ID",
+			msg: DeclineDMMessage{
+				DMChannelID: 999999999,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload, err := tt.msg.Encode()
+			require.NoError(t, err)
+
+			decoded := &DeclineDMMessage{}
+			err = decoded.Decode(payload)
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.msg.DMChannelID, decoded.DMChannelID)
+		})
+	}
+}
+
+func TestDMDeclinedMessage(t *testing.T) {
+	userID := uint64(42)
+	tests := []struct {
+		name string
+		msg  DMDeclinedMessage
+	}{
+		{
+			name: "declined by registered user",
+			msg: DMDeclinedMessage{
+				DMChannelID: 12345,
+				UserID:      &userID,
+				Nickname:    "alice",
+			},
+		},
+		{
+			name: "declined by anonymous user",
+			msg: DMDeclinedMessage{
+				DMChannelID: 99999,
+				UserID:      nil,
+				Nickname:    "guest123",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload, err := tt.msg.Encode()
+			require.NoError(t, err)
+
+			decoded := &DMDeclinedMessage{}
+			err = decoded.Decode(payload)
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.msg.DMChannelID, decoded.DMChannelID)
+			assert.Equal(t, tt.msg.Nickname, decoded.Nickname)
+
+			if tt.msg.UserID != nil {
+				require.NotNil(t, decoded.UserID)
+				assert.Equal(t, *tt.msg.UserID, *decoded.UserID)
+			} else {
+				assert.Nil(t, decoded.UserID)
 			}
 		})
 	}

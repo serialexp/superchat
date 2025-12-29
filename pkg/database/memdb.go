@@ -258,6 +258,11 @@ func (m *MemDB) snapshot() error {
 	for _, id := range dirtyIDs {
 		msg := m.messages[id]
 
+		// Skip messages that no longer exist (e.g., channel was deleted)
+		if msg == nil {
+			continue
+		}
+
 		// Skip old deleted messages (will be hard-deleted later)
 		if msg.DeletedAt != nil && *msg.DeletedAt < retentionCutoff {
 			messagesSkipped++
@@ -654,6 +659,37 @@ func (m *MemDB) PostMessage(channelID int64, subchannelID, parentID, authorUserI
 	if threadRootID != nil {
 		m.messagesByThread[*threadRootID] = append(m.messagesByThread[*threadRootID], messageID)
 	}
+	m.mu.Unlock()
+
+	return messageID, message, nil
+}
+
+// CreateSystemMessage creates a system message (empty author) in a channel
+// Used for DM events like "user has left the conversation"
+func (m *MemDB) CreateSystemMessage(channelID int64, content string) (int64, *Message, error) {
+	messageID := m.sqliteDB.snowflake.NextID()
+	now := nowMillis()
+
+	message := &Message{
+		ID:             messageID,
+		ChannelID:      channelID,
+		SubchannelID:   nil,
+		ParentID:       nil,
+		ThreadRootID:   nil, // System messages aren't part of threads
+		AuthorUserID:   nil,
+		AuthorNickname: "", // Empty author = system message
+		Content:        content,
+		CreatedAt:      now,
+		EditedAt:       nil,
+		DeletedAt:      nil,
+	}
+
+	m.mu.Lock()
+	m.messages[messageID] = message
+	m.dirtyMessages[messageID] = true
+
+	// Update channel index
+	m.messagesByChannel[channelID] = append(m.messagesByChannel[channelID], messageID)
 	m.mu.Unlock()
 
 	return messageID, message, nil
@@ -1263,9 +1299,9 @@ func (m *MemDB) DeleteChannel(channelID uint64) error {
 
 	// Clean up message indexes for this channel
 	if messageIDs, exists := m.messagesByChannel[int64(channelID)]; exists {
-		// Mark all messages as dirty so they get deleted from SQLite
 		for _, msgID := range messageIDs {
 			delete(m.messages, msgID)
+			delete(m.dirtyMessages, msgID) // Also clean up dirty flags
 		}
 		delete(m.messagesByChannel, int64(channelID))
 	}
@@ -1428,6 +1464,11 @@ func (m *MemDB) CreateDMInvite(initiatorUserID, targetUserID int64, isEncrypted 
 	return m.sqliteDB.CreateDMInvite(initiatorUserID, targetUserID, isEncrypted)
 }
 
+// CreateDMInviteWithSessions creates a pending DM invite supporting both registered and anonymous users
+func (m *MemDB) CreateDMInviteWithSessions(initiatorUserID, targetUserID *int64, initiatorSessionID, targetSessionID int64, isEncrypted bool) (int64, error) {
+	return m.sqliteDB.CreateDMInviteWithSessions(initiatorUserID, targetUserID, initiatorSessionID, targetSessionID, isEncrypted)
+}
+
 // GetDMInvite retrieves a specific DM invite by ID
 func (m *MemDB) GetDMInvite(inviteID int64) (*DMInvite, error) {
 	return m.sqliteDB.GetDMInvite(inviteID)
@@ -1443,6 +1484,11 @@ func (m *MemDB) GetPendingDMInvitesForUser(userID int64) ([]*DMInvite, error) {
 	return m.sqliteDB.GetPendingDMInvitesForUser(userID)
 }
 
+// GetPendingDMInvitesForSession returns all pending DM invites where session is the target
+func (m *MemDB) GetPendingDMInvitesForSession(sessionID int64) ([]*DMInvite, error) {
+	return m.sqliteDB.GetPendingDMInvitesForSession(sessionID)
+}
+
 // DeleteDMInvite removes a DM invite (after accept/decline)
 func (m *MemDB) DeleteDMInvite(inviteID int64) error {
 	return m.sqliteDB.DeleteDMInvite(inviteID)
@@ -1451,4 +1497,77 @@ func (m *MemDB) DeleteDMInvite(inviteID int64) error {
 // DeleteDMInviteBetweenUsers removes any invite between two users
 func (m *MemDB) DeleteDMInviteBetweenUsers(user1ID, user2ID int64) error {
 	return m.sqliteDB.DeleteDMInviteBetweenUsers(user1ID, user2ID)
+}
+
+// === ChannelParticipant methods ===
+
+// CreateDMChannelWithParticipants creates a DM channel and adds participants
+func (m *MemDB) CreateDMChannelWithParticipants(
+	user1ID *int64, session1ID int64, nickname1 string,
+	user2ID *int64, session2ID int64, nickname2 string,
+) (int64, error) {
+	channelID, err := m.sqliteDB.CreateDMChannelWithParticipants(user1ID, session1ID, nickname1, user2ID, session2ID, nickname2)
+	if err != nil {
+		return 0, err
+	}
+
+	// Add the channel to the in-memory cache
+	now := time.Now().UnixMilli()
+	ch := &Channel{
+		ID:                    channelID,
+		Name:                  fmt.Sprintf("dm_%d_%d", session1ID, session2ID),
+		DisplayName:           "Direct Message",
+		ChannelType:           0, // Chat type
+		MessageRetentionHours: 168,
+		CreatedAt:             now,
+		IsPrivate:             true,
+		IsDM:                  true,
+	}
+
+	m.mu.Lock()
+	m.channels[channelID] = ch
+	m.mu.Unlock()
+
+	log.Printf("MemDB: added DM channel to cache: id=%d", channelID)
+	return channelID, nil
+}
+
+// GetChannelParticipants returns all participants in a channel
+func (m *MemDB) GetChannelParticipants(channelID int64) ([]*ChannelParticipant, error) {
+	return m.sqliteDB.GetChannelParticipants(channelID)
+}
+
+// IsChannelParticipant checks if a user/session is a participant in a channel
+func (m *MemDB) IsChannelParticipant(channelID int64, userID *int64, sessionID int64) (bool, error) {
+	return m.sqliteDB.IsChannelParticipant(channelID, userID, sessionID)
+}
+
+// UpdateParticipantSession updates the session ID for a registered user participant
+func (m *MemDB) UpdateParticipantSession(channelID, userID, sessionID int64) error {
+	return m.sqliteDB.UpdateParticipantSession(channelID, userID, sessionID)
+}
+
+// ClearParticipantSession clears the session ID for a registered user (when offline)
+func (m *MemDB) ClearParticipantSession(channelID, userID int64) error {
+	return m.sqliteDB.ClearParticipantSession(channelID, userID)
+}
+
+// RemoveParticipantByUserID removes a registered user from a channel
+func (m *MemDB) RemoveParticipantByUserID(channelID, userID int64) error {
+	return m.sqliteDB.RemoveParticipantByUserID(channelID, userID)
+}
+
+// RemoveParticipantBySessionID removes an anonymous user from a channel
+func (m *MemDB) RemoveParticipantBySessionID(channelID, sessionID int64) error {
+	return m.sqliteDB.RemoveParticipantBySessionID(channelID, sessionID)
+}
+
+// GetDMChannelsForParticipant returns all DM channel IDs that a user/session is a participant in
+func (m *MemDB) GetDMChannelsForParticipant(userID *int64, sessionID int64) ([]int64, error) {
+	return m.sqliteDB.GetDMChannelsForParticipant(userID, sessionID)
+}
+
+// RemoveAnonymousParticipantsBySession removes anonymous participants when their session ends
+func (m *MemDB) RemoveAnonymousParticipantsBySession(sessionID int64) ([]int64, error) {
+	return m.sqliteDB.RemoveAnonymousParticipantsBySession(sessionID)
 }

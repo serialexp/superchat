@@ -636,3 +636,18 @@ func TestServerPresenceDecodeErrors(t *testing.T) {
 		assert.Error(t, err)
 	})
 }
+
+func TestDMParticipantLeftDecodeErrors(t *testing.T) {
+	t.Run("invalid payload - empty", func(t *testing.T) {
+		msg := &DMParticipantLeftMessage{}
+		err := msg.Decode([]byte{})
+		assert.Error(t, err)
+	})
+
+	t.Run("invalid payload - incomplete", func(t *testing.T) {
+		msg := &DMParticipantLeftMessage{}
+		payload := []byte{0x00, 0x00} // partial dm_channel_id
+		err := msg.Decode(payload)
+		assert.Error(t, err)
+	})
+}

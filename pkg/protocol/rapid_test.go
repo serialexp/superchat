@@ -826,6 +826,48 @@ func TestServerPresenceRoundTrip(t *testing.T) {
 	})
 }
 
+// TestDMParticipantLeftRoundTrip tests DMParticipantLeftMessage encoding
+func TestDMParticipantLeftRoundTrip(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		dmChannelID := rapid.Uint64().Draw(t, "dm_channel_id")
+		nickname := rapid.StringN(1, 20, 256).Draw(t, "nickname")
+		var userID *uint64
+		if rapid.Bool().Draw(t, "has_user_id") {
+			id := rapid.Uint64().Draw(t, "user_id")
+			userID = &id
+		}
+
+		original := &DMParticipantLeftMessage{
+			DMChannelID: dmChannelID,
+			UserID:      userID,
+			Nickname:    nickname,
+		}
+
+		var buf bytes.Buffer
+		if err := original.EncodeTo(&buf); err != nil {
+			t.Fatalf("encode failed: %v", err)
+		}
+
+		decoded := &DMParticipantLeftMessage{}
+		if err := decoded.Decode(buf.Bytes()); err != nil {
+			t.Fatalf("decode failed: %v", err)
+		}
+
+		if decoded.DMChannelID != original.DMChannelID {
+			t.Fatalf("dm_channel_id mismatch")
+		}
+		if (decoded.UserID == nil) != (original.UserID == nil) {
+			t.Fatalf("user_id presence mismatch")
+		}
+		if decoded.UserID != nil && *decoded.UserID != *original.UserID {
+			t.Fatalf("user_id mismatch")
+		}
+		if decoded.Nickname != original.Nickname {
+			t.Fatalf("nickname mismatch")
+		}
+	})
+}
+
 // TestRegisterUserRoundTrip tests RegisterUserMessage encoding
 func TestRegisterUserRoundTrip(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {

@@ -1,7 +1,9 @@
 package client
 
 import (
+	"fmt"
 	"sync"
+	"time"
 )
 
 // MockState is an in-memory test implementation of StateInterface
@@ -231,6 +233,27 @@ func (s *MockState) GetFirstPostWarningDismissed() bool {
 // SetFirstPostWarningDismissed marks the first post warning as dismissed (mock)
 func (s *MockState) SetFirstPostWarningDismissed() error {
 	return s.SetConfig("first_post_warning_dismissed", "true")
+}
+
+// GetLastSeenTimestamp returns the last seen timestamp (mock)
+func (s *MockState) GetLastSeenTimestamp() int64 {
+	timestampStr, _ := s.GetConfig("last_seen_timestamp")
+	if timestampStr == "" {
+		return 0
+	}
+	var timestamp int64
+	fmt.Sscanf(timestampStr, "%d", &timestamp)
+	return timestamp
+}
+
+// SetLastSeenTimestamp stores the last seen timestamp (mock)
+func (s *MockState) SetLastSeenTimestamp(timestamp int64) error {
+	return s.SetConfig("last_seen_timestamp", fmt.Sprintf("%d", timestamp))
+}
+
+// UpdateLastSeenTimestamp updates the last seen timestamp to now (mock)
+func (s *MockState) UpdateLastSeenTimestamp() error {
+	return s.SetLastSeenTimestamp(time.Now().UnixMilli())
 }
 
 // Verify that MockState implements StateInterface

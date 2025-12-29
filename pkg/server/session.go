@@ -115,13 +115,26 @@ func (sm *SessionManager) CreateSession(userID *int64, nickname, connType string
 	return sess, nil
 }
 
-// GetSession returns a session by ID
+// GetSession returns a session by in-memory ID
 func (sm *SessionManager) GetSession(sessionID uint64) (*Session, bool) {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
 	sess, ok := sm.sessions[sessionID]
 	return sess, ok
+}
+
+// GetSessionByDBID returns a session by its database ID
+func (sm *SessionManager) GetSessionByDBID(dbSessionID int64) (*Session, bool) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	for _, sess := range sm.sessions {
+		if sess.DBSessionID == dbSessionID {
+			return sess, true
+		}
+	}
+	return nil, false
 }
 
 // GetAllSessions returns all active sessions

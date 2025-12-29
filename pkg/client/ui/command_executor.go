@@ -6,6 +6,7 @@ import (
 	"github.com/aeolun/superchat/pkg/client/commands"
 	"github.com/aeolun/superchat/pkg/client/ui/modal"
 	"github.com/aeolun/superchat/pkg/protocol"
+	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -121,7 +122,7 @@ func (m Model) ExecuteActionWithReturn(actionID string) (Model, tea.Cmd) {
 		return m.toggleHelp()
 
 	case commands.ActionQuit:
-		return m, tea.Quit
+		return m, m.saveAndQuit()
 
 	case commands.ActionServerList:
 		return m.openServerSelector()
@@ -208,7 +209,8 @@ func (m Model) navigateUp() (Model, tea.Cmd) {
 func (m Model) navigateDown() (Model, tea.Cmd) {
 	switch m.currentView {
 	case ViewChannelList:
-		if m.channelCursor < len(m.channels)-1 {
+		maxIndex := m.getVisibleChannelListItemCount() - 1
+		if m.channelCursor < maxIndex {
 			m.channelCursor++
 		}
 	case ViewThreadList:
@@ -255,7 +257,7 @@ func (m Model) goBack() (Model, tea.Cmd) {
 		m.currentChannel = nil
 		// Leave channel
 		if m.hasActiveChannel {
-			return m, m.sendLeaveChannel(m.activeChannelID)
+			return m, m.sendLeaveChannel(m.activeChannelID, false)
 		}
 	}
 	return m, nil
@@ -337,9 +339,59 @@ func (m Model) openCreateChannel() (Model, tea.Cmd) {
 // === Existing helper methods that we're calling ===
 
 func (m Model) selectCurrentChannel() (Model, tea.Cmd) {
-	if m.channelCursor >= 0 && m.channelCursor < len(m.channels) {
-		ch := m.channels[m.channelCursor]
-		m.currentChannel = &ch
+	item := m.getChannelListItemAtCursor()
+	if item == nil {
+		return m, nil
+	}
+
+	switch item.Type {
+	case ChannelListItemDM:
+		// DM channel selected - join it as a chat channel
+		dm := item.DM
+		m.currentChannel = &protocol.Channel{
+			ID:   dm.ChannelID,
+			Name: dm.OtherNickname,
+			Type: 0, // Chat type
+		}
+		m.currentView = ViewChatChannel
+		m.loadingChat = true
+		m.allChatLoaded = false
+		m.chatMessages = nil
+		m.chatTextarea.Reset()
+		m.chatTextarea.Focus()
+		return m, tea.Batch(
+			m.sendJoinChannel(dm.ChannelID),
+			m.requestChatMessages(dm.ChannelID),
+			m.sendSubscribeChannel(dm.ChannelID),
+			textarea.Blink,
+		)
+
+	case ChannelListItemPendingDM:
+		// Pending DM invite selected - show the DM request modal
+		invite := item.PendingDM
+		dmModal := modal.NewDMRequestModal(modal.DMRequestModalConfig{
+			ChannelID:        invite.ChannelID,
+			FromNickname:     invite.FromNickname,
+			FromUserID:       invite.FromUserID,
+			EncryptionStatus: invite.EncryptionStatus,
+			OnAccept: func(channelID uint64, allowUnencrypted bool) tea.Cmd {
+				return m.sendAllowUnencrypted(channelID, false)
+			},
+			OnDecline: func(channelID uint64) tea.Cmd {
+				return func() tea.Msg {
+					return DMDeclinedMsg{ChannelID: channelID}
+				}
+			},
+			OnSetupEncryption: func(channelID uint64) tea.Cmd {
+				return nil
+			},
+		})
+		m.modalStack.Push(dmModal)
+		return m, nil
+
+	case ChannelListItemChannel:
+		ch := item.Channel
+		m.currentChannel = ch
 
 		// Join and subscribe to channel
 		var cmds []tea.Cmd
@@ -350,15 +402,53 @@ func (m Model) selectCurrentChannel() (Model, tea.Cmd) {
 		if ch.Type == 0 {
 			// Chat channel
 			m.currentView = ViewChatChannel
+			m.loadingChat = true
+			m.chatMessages = nil
+			m.chatTextarea.Reset()
+			m.chatTextarea.Focus()
 			cmds = append(cmds, m.requestChatMessages(ch.ID))
+			cmds = append(cmds, textarea.Blink)
 		} else {
 			// Forum channel
 			m.currentView = ViewThreadList
+			m.loadingThreadList = true
+			m.threads = nil
 			cmds = append(cmds, m.requestThreadList(ch.ID))
 		}
 
 		return m, tea.Batch(cmds...)
+
+	case ChannelListItemSubchannel:
+		// Subchannel selected
+		sub := item.Subchannel
+		m.currentChannel = &protocol.Channel{
+			ID:   sub.ID,
+			Name: sub.Name,
+			Type: sub.Type,
+		}
+
+		var cmds []tea.Cmd
+		cmds = append(cmds, m.sendJoinChannel(sub.ID))
+		cmds = append(cmds, m.sendSubscribeChannel(sub.ID))
+
+		if sub.Type == 0 {
+			m.currentView = ViewChatChannel
+			m.loadingChat = true
+			m.chatMessages = nil
+			m.chatTextarea.Reset()
+			m.chatTextarea.Focus()
+			cmds = append(cmds, m.requestChatMessages(sub.ID))
+			cmds = append(cmds, textarea.Blink)
+		} else {
+			m.currentView = ViewThreadList
+			m.loadingThreadList = true
+			m.threads = nil
+			cmds = append(cmds, m.requestThreadList(sub.ID))
+		}
+
+		return m, tea.Batch(cmds...)
 	}
+
 	return m, nil
 }
 

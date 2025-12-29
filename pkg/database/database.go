@@ -269,13 +269,25 @@ type ChannelAccess struct {
 	CreatedAt int64 // Unix timestamp in milliseconds
 }
 
+// ChannelParticipant tracks DM channel membership for both registered and anonymous users
+type ChannelParticipant struct {
+	ID        int64
+	ChannelID int64
+	UserID    *int64 // nil for anonymous users
+	SessionID *int64 // current session, nil if registered user is offline
+	Nickname  string // nickname at time of joining
+	JoinedAt  int64  // Unix timestamp in milliseconds
+}
+
 // DMInvite represents a pending DM request awaiting acceptance - V3 feature
 type DMInvite struct {
-	ID              int64
-	InitiatorUserID int64
-	TargetUserID    int64
-	IsEncrypted     bool  // true if both parties have encryption keys
-	CreatedAt       int64 // Unix timestamp in milliseconds
+	ID                 int64
+	InitiatorUserID    *int64 // nil for anonymous initiator
+	TargetUserID       *int64 // nil for anonymous target
+	InitiatorSessionID *int64 // session ID for anonymous initiator
+	TargetSessionID    *int64 // session ID for anonymous target
+	IsEncrypted        bool   // true if both parties have encryption keys
+	CreatedAt          int64  // Unix timestamp in milliseconds
 }
 
 // Message represents a message record
@@ -686,6 +698,44 @@ func (db *DB) PostMessage(channelID int64, subchannelID, parentID, authorUserID 
 	}
 
 	// Commit transaction
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+
+	return messageID, nil
+}
+
+// CreateSystemMessage creates a system message (empty author) in a channel
+// Used for DM events like "user has left the conversation"
+func (db *DB) CreateSystemMessage(channelID int64, content string) (int64, error) {
+	tx, err := db.writeConn.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	messageID := db.snowflake.NextID()
+	now := nowMillis()
+
+	_, err = tx.Exec(`
+		INSERT INTO Message (id, channel_id, author_user_id, author_nickname, content, created_at)
+		VALUES (?, ?, NULL, '', ?, ?)
+	`, messageID, channelID, content, now)
+
+	if err != nil {
+		return 0, err
+	}
+
+	// Insert version record
+	_, err = tx.Exec(`
+		INSERT INTO MessageVersion (message_id, content, author_nickname, created_at, version_type)
+		VALUES (?, ?, '', ?, 'created')
+	`, messageID, content, now)
+
+	if err != nil {
+		return 0, err
+	}
+
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
@@ -2531,7 +2581,7 @@ func (db *DB) UserHasAccessToChannel(userID, channelID int64) (bool, error) {
 	return count > 0, nil
 }
 
-// CreateDMInvite creates a pending DM invite
+// CreateDMInvite creates a pending DM invite (for registered users)
 func (db *DB) CreateDMInvite(initiatorUserID, targetUserID int64, isEncrypted bool) (int64, error) {
 	result, err := db.writeConn.Exec(`
 		INSERT OR REPLACE INTO DMInvite (initiator_user_id, target_user_id, is_encrypted, created_at)
@@ -2543,13 +2593,50 @@ func (db *DB) CreateDMInvite(initiatorUserID, targetUserID int64, isEncrypted bo
 	return result.LastInsertId()
 }
 
+// CreateDMInviteWithSessions creates a pending DM invite supporting both registered and anonymous users
+func (db *DB) CreateDMInviteWithSessions(initiatorUserID, targetUserID *int64, initiatorSessionID, targetSessionID int64, isEncrypted bool) (int64, error) {
+	// Debug: log what we're trying to insert
+	log.Printf("[DEBUG] CreateDMInviteWithSessions: initiatorUserID=%v, targetUserID=%v, initiatorSessionID=%d, targetSessionID=%d",
+		initiatorUserID, targetUserID, initiatorSessionID, targetSessionID)
+
+	// Debug: check if sessions exist in database
+	var initSessExists, targetSessExists int
+	db.conn.QueryRow("SELECT COUNT(*) FROM Session WHERE id = ?", initiatorSessionID).Scan(&initSessExists)
+	db.conn.QueryRow("SELECT COUNT(*) FROM Session WHERE id = ?", targetSessionID).Scan(&targetSessExists)
+	log.Printf("[DEBUG] Session existence check: initiator(%d)=%d, target(%d)=%d",
+		initiatorSessionID, initSessExists, targetSessionID, targetSessExists)
+
+	// Debug: list all sessions in database
+	rows, _ := db.conn.Query("SELECT id, nickname FROM Session")
+	if rows != nil {
+		defer rows.Close()
+		var ids []int64
+		for rows.Next() {
+			var id int64
+			var nickname string
+			rows.Scan(&id, &nickname)
+			ids = append(ids, id)
+		}
+		log.Printf("[DEBUG] All sessions in DB: %v", ids)
+	}
+
+	result, err := db.writeConn.Exec(`
+		INSERT INTO DMInvite (initiator_user_id, target_user_id, initiator_session_id, target_session_id, is_encrypted, created_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, initiatorUserID, targetUserID, initiatorSessionID, targetSessionID, isEncrypted, nowMillis())
+	if err != nil {
+		return 0, err
+	}
+	return result.LastInsertId()
+}
+
 // GetDMInvite retrieves a specific DM invite by ID
 func (db *DB) GetDMInvite(inviteID int64) (*DMInvite, error) {
 	var invite DMInvite
 	err := db.conn.QueryRow(`
-		SELECT id, initiator_user_id, target_user_id, is_encrypted, created_at
+		SELECT id, initiator_user_id, target_user_id, initiator_session_id, target_session_id, is_encrypted, created_at
 		FROM DMInvite WHERE id = ?
-	`, inviteID).Scan(&invite.ID, &invite.InitiatorUserID, &invite.TargetUserID, &invite.IsEncrypted, &invite.CreatedAt)
+	`, inviteID).Scan(&invite.ID, &invite.InitiatorUserID, &invite.TargetUserID, &invite.InitiatorSessionID, &invite.TargetSessionID, &invite.IsEncrypted, &invite.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -2560,13 +2647,13 @@ func (db *DB) GetDMInvite(inviteID int64) (*DMInvite, error) {
 func (db *DB) GetDMInviteBetweenUsers(user1ID, user2ID int64) (*DMInvite, error) {
 	var invite DMInvite
 	err := db.conn.QueryRow(`
-		SELECT id, initiator_user_id, target_user_id, is_encrypted, created_at
+		SELECT id, initiator_user_id, target_user_id, initiator_session_id, target_session_id, is_encrypted, created_at
 		FROM DMInvite
 		WHERE (initiator_user_id = ? AND target_user_id = ?)
 		   OR (initiator_user_id = ? AND target_user_id = ?)
 		LIMIT 1
 	`, user1ID, user2ID, user2ID, user1ID).Scan(
-		&invite.ID, &invite.InitiatorUserID, &invite.TargetUserID, &invite.IsEncrypted, &invite.CreatedAt,
+		&invite.ID, &invite.InitiatorUserID, &invite.TargetUserID, &invite.InitiatorSessionID, &invite.TargetSessionID, &invite.IsEncrypted, &invite.CreatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -2580,7 +2667,7 @@ func (db *DB) GetDMInviteBetweenUsers(user1ID, user2ID int64) (*DMInvite, error)
 // GetPendingDMInvitesForUser returns all pending DM invites where user is the target
 func (db *DB) GetPendingDMInvitesForUser(userID int64) ([]*DMInvite, error) {
 	rows, err := db.conn.Query(`
-		SELECT id, initiator_user_id, target_user_id, is_encrypted, created_at
+		SELECT id, initiator_user_id, target_user_id, initiator_session_id, target_session_id, is_encrypted, created_at
 		FROM DMInvite
 		WHERE target_user_id = ?
 		ORDER BY created_at DESC
@@ -2593,7 +2680,31 @@ func (db *DB) GetPendingDMInvitesForUser(userID int64) ([]*DMInvite, error) {
 	var invites []*DMInvite
 	for rows.Next() {
 		var invite DMInvite
-		if err := rows.Scan(&invite.ID, &invite.InitiatorUserID, &invite.TargetUserID, &invite.IsEncrypted, &invite.CreatedAt); err != nil {
+		if err := rows.Scan(&invite.ID, &invite.InitiatorUserID, &invite.TargetUserID, &invite.InitiatorSessionID, &invite.TargetSessionID, &invite.IsEncrypted, &invite.CreatedAt); err != nil {
+			return nil, err
+		}
+		invites = append(invites, &invite)
+	}
+	return invites, rows.Err()
+}
+
+// GetPendingDMInvitesForSession returns all pending DM invites where session is the target
+func (db *DB) GetPendingDMInvitesForSession(sessionID int64) ([]*DMInvite, error) {
+	rows, err := db.conn.Query(`
+		SELECT id, initiator_user_id, target_user_id, initiator_session_id, target_session_id, is_encrypted, created_at
+		FROM DMInvite
+		WHERE target_session_id = ?
+		ORDER BY created_at DESC
+	`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var invites []*DMInvite
+	for rows.Next() {
+		var invite DMInvite
+		if err := rows.Scan(&invite.ID, &invite.InitiatorUserID, &invite.TargetUserID, &invite.InitiatorSessionID, &invite.TargetSessionID, &invite.IsEncrypted, &invite.CreatedAt); err != nil {
 			return nil, err
 		}
 		invites = append(invites, &invite)
@@ -2615,4 +2726,235 @@ func (db *DB) DeleteDMInviteBetweenUsers(user1ID, user2ID int64) error {
 		   OR (initiator_user_id = ? AND target_user_id = ?)
 	`, user1ID, user2ID, user2ID, user1ID)
 	return err
+}
+
+// === ChannelParticipant methods ===
+
+// CreateDMChannelWithParticipants creates a DM channel and adds participants
+// Supports both registered users (with userID) and anonymous users (session only)
+func (db *DB) CreateDMChannelWithParticipants(
+	user1ID *int64, session1ID int64, nickname1 string,
+	user2ID *int64, session2ID int64, nickname2 string,
+) (int64, error) {
+	tx, err := db.writeConn.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	now := nowMillis()
+
+	// Generate a unique name for the DM channel
+	dmName := fmt.Sprintf("dm_%d_%d", session1ID, session2ID)
+
+	// Create the DM channel (private, is_dm=true, type=0 for chat)
+	result, err := tx.Exec(`
+		INSERT INTO Channel (name, display_name, channel_type, message_retention_hours, is_private, is_dm, created_at)
+		VALUES (?, ?, 0, 168, 1, 1, ?)
+	`, dmName, "Direct Message", now)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create DM channel: %w", err)
+	}
+
+	channelID, err := result.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get channel ID: %w", err)
+	}
+
+	// Add first participant
+	_, err = tx.Exec(`
+		INSERT INTO ChannelParticipant (channel_id, user_id, session_id, nickname, joined_at)
+		VALUES (?, ?, ?, ?, ?)
+	`, channelID, user1ID, session1ID, nickname1, now)
+	if err != nil {
+		return 0, fmt.Errorf("failed to add participant 1: %w", err)
+	}
+
+	// Add second participant
+	_, err = tx.Exec(`
+		INSERT INTO ChannelParticipant (channel_id, user_id, session_id, nickname, joined_at)
+		VALUES (?, ?, ?, ?, ?)
+	`, channelID, user2ID, session2ID, nickname2, now)
+	if err != nil {
+		return 0, fmt.Errorf("failed to add participant 2: %w", err)
+	}
+
+	// Also add to ChannelAccess for registered users (for backwards compatibility)
+	if user1ID != nil {
+		tx.Exec(`INSERT INTO ChannelAccess (channel_id, user_id, created_at) VALUES (?, ?, ?)`,
+			channelID, *user1ID, now)
+	}
+	if user2ID != nil {
+		tx.Exec(`INSERT INTO ChannelAccess (channel_id, user_id, created_at) VALUES (?, ?, ?)`,
+			channelID, *user2ID, now)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	log.Printf("[DM] Created DM channel %d with participants: user1=%v/sess1=%d, user2=%v/sess2=%d",
+		channelID, user1ID, session1ID, user2ID, session2ID)
+
+	return channelID, nil
+}
+
+// GetChannelParticipants returns all participants in a channel
+func (db *DB) GetChannelParticipants(channelID int64) ([]*ChannelParticipant, error) {
+	rows, err := db.conn.Query(`
+		SELECT id, channel_id, user_id, session_id, nickname, joined_at
+		FROM ChannelParticipant
+		WHERE channel_id = ?
+	`, channelID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var participants []*ChannelParticipant
+	for rows.Next() {
+		p := &ChannelParticipant{}
+		if err := rows.Scan(&p.ID, &p.ChannelID, &p.UserID, &p.SessionID, &p.Nickname, &p.JoinedAt); err != nil {
+			return nil, err
+		}
+		participants = append(participants, p)
+	}
+	return participants, rows.Err()
+}
+
+// IsChannelParticipant checks if a user/session is a participant in a channel
+func (db *DB) IsChannelParticipant(channelID int64, userID *int64, sessionID int64) (bool, error) {
+	var count int
+	var err error
+
+	if userID != nil {
+		// Check by user ID (registered user)
+		err = db.conn.QueryRow(`
+			SELECT COUNT(*) FROM ChannelParticipant
+			WHERE channel_id = ? AND user_id = ?
+		`, channelID, *userID).Scan(&count)
+	} else {
+		// Check by session ID (anonymous user)
+		err = db.conn.QueryRow(`
+			SELECT COUNT(*) FROM ChannelParticipant
+			WHERE channel_id = ? AND session_id = ? AND user_id IS NULL
+		`, channelID, sessionID).Scan(&count)
+	}
+
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+// UpdateParticipantSession updates the session ID for a registered user participant
+func (db *DB) UpdateParticipantSession(channelID, userID, sessionID int64) error {
+	_, err := db.writeConn.Exec(`
+		UPDATE ChannelParticipant
+		SET session_id = ?
+		WHERE channel_id = ? AND user_id = ?
+	`, sessionID, channelID, userID)
+	return err
+}
+
+// ClearParticipantSession clears the session ID for a registered user (when offline)
+func (db *DB) ClearParticipantSession(channelID, userID int64) error {
+	_, err := db.writeConn.Exec(`
+		UPDATE ChannelParticipant
+		SET session_id = NULL
+		WHERE channel_id = ? AND user_id = ?
+	`, channelID, userID)
+	return err
+}
+
+// RemoveParticipantByUserID removes a registered user from a channel
+func (db *DB) RemoveParticipantByUserID(channelID, userID int64) error {
+	_, err := db.writeConn.Exec(`
+		DELETE FROM ChannelParticipant
+		WHERE channel_id = ? AND user_id = ?
+	`, channelID, userID)
+	return err
+}
+
+// RemoveParticipantBySessionID removes an anonymous user from a channel
+func (db *DB) RemoveParticipantBySessionID(channelID, sessionID int64) error {
+	_, err := db.writeConn.Exec(`
+		DELETE FROM ChannelParticipant
+		WHERE channel_id = ? AND session_id = ? AND user_id IS NULL
+	`, channelID, sessionID)
+	return err
+}
+
+// GetDMChannelsForParticipant returns all DM channel IDs that a user/session is a participant in
+func (db *DB) GetDMChannelsForParticipant(userID *int64, sessionID int64) ([]int64, error) {
+	var rows *sql.Rows
+	var err error
+
+	if userID != nil {
+		// For registered users, match by user ID
+		rows, err = db.conn.Query(`
+			SELECT cp.channel_id
+			FROM ChannelParticipant cp
+			JOIN Channel c ON c.id = cp.channel_id
+			WHERE cp.user_id = ? AND c.is_dm = 1
+		`, *userID)
+	} else {
+		// For anonymous users, match by session ID
+		rows, err = db.conn.Query(`
+			SELECT cp.channel_id
+			FROM ChannelParticipant cp
+			JOIN Channel c ON c.id = cp.channel_id
+			WHERE cp.session_id = ? AND cp.user_id IS NULL AND c.is_dm = 1
+		`, sessionID)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var channelIDs []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		channelIDs = append(channelIDs, id)
+	}
+	return channelIDs, rows.Err()
+}
+
+// RemoveAnonymousParticipantsBySession removes anonymous participants when their session ends
+// Returns the channel IDs that were affected (for potential cleanup)
+func (db *DB) RemoveAnonymousParticipantsBySession(sessionID int64) ([]int64, error) {
+	// First get the channel IDs that will be affected
+	rows, err := db.conn.Query(`
+		SELECT channel_id FROM ChannelParticipant
+		WHERE session_id = ? AND user_id IS NULL
+	`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	var channelIDs []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		channelIDs = append(channelIDs, id)
+	}
+	rows.Close()
+
+	// Remove the anonymous participants
+	_, err = db.writeConn.Exec(`
+		DELETE FROM ChannelParticipant
+		WHERE session_id = ? AND user_id IS NULL
+	`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	return channelIDs, nil
 }

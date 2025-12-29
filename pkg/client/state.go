@@ -195,3 +195,27 @@ func (s *State) GetFirstPostWarningDismissed() bool {
 func (s *State) SetFirstPostWarningDismissed() error {
 	return s.SetConfig("first_post_warning_dismissed", "true")
 }
+
+// GetLastSeenTimestamp returns the timestamp when the client was last active (in milliseconds)
+// Returns 0 if no timestamp has been stored
+func (s *State) GetLastSeenTimestamp() int64 {
+	timestampStr, _ := s.GetConfig("last_seen_timestamp")
+	if timestampStr == "" {
+		return 0
+	}
+	var timestamp int64
+	if _, err := fmt.Sscanf(timestampStr, "%d", &timestamp); err != nil {
+		return 0
+	}
+	return timestamp
+}
+
+// SetLastSeenTimestamp stores the current timestamp as the last active time (in milliseconds)
+func (s *State) SetLastSeenTimestamp(timestamp int64) error {
+	return s.SetConfig("last_seen_timestamp", fmt.Sprintf("%d", timestamp))
+}
+
+// UpdateLastSeenTimestamp updates the last seen timestamp to now
+func (s *State) UpdateLastSeenTimestamp() error {
+	return s.SetLastSeenTimestamp(time.Now().UnixMilli())
+}

@@ -14,6 +14,7 @@ import (
 	"github.com/aeolun/superchat/pkg/client/crypto"
 	"github.com/aeolun/superchat/pkg/client/ui/modal"
 	"github.com/aeolun/superchat/pkg/protocol"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/gen2brain/beeep"
@@ -95,6 +96,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		return m, nil
+
+	case PostChatMessageMsg:
+		// Handle deferred chat message posting (after registration warning dismissed)
+		m.chatTextarea.Reset()
+		return m.sendChatMessageWithContent(msg.Content)
 
 	case ServerFrameMsg:
 		return m.handleServerFrame(msg.Frame)
@@ -227,6 +233,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// No-op message just to trigger a re-render
 		return m, nil
 
+	case ClearStatusMsg:
+		// Only clear if version matches (prevents stale timeouts from clearing new messages)
+		if msg.Version == m.statusVersion {
+			m.statusMessage = ""
+		}
+		return m, nil
+
 	case InitTimeoutCheckMsg:
 		// Check if initialization timeout has been reached
 		if m.initStateMachine.OnTimeout() {
@@ -301,7 +314,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		savedServer, _ := m.state.GetConfig("directory_selected_server")
 		if m.directoryMode && savedServer == "" {
 			// First run, user declined to choose a server - exit
-			return m, tea.Quit
+			return m, m.saveAndQuit()
 		}
 		// User just closed the server selector, continue normally
 		return m, nil
@@ -352,13 +365,63 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, msg.Cmd
 
 	case EncryptionKeyGeneratedMsg:
-		// Store the generated encryption keys
+		// Store the generated encryption keys (always do this, keys are valid)
 		m.encryptionKeyPub = msg.PublicKey[:]
 		m.encryptionKeyPriv = msg.PrivateKey[:]
-		// TODO: Persist private key using crypto.KeyStore for future sessions
-		m.statusMessage = "Encryption key generated successfully"
+
+		// Persist the key to disk
+		m.persistEncryptionKey(msg.PrivateKey[:])
+
+		// Only show success if the modal is still active (user didn't cancel)
+		if !m.modalStack.HasType(modal.ModalEncryptionSetup) {
+			// Modal was cancelled, just keep the keys silently
+			return m, nil
+		}
+
 		// Close the encryption setup modal
 		m.modalStack.RemoveByType(modal.ModalEncryptionSetup)
+		return m, m.setStatus("Encryption key generated successfully")
+
+	case DMKeyGeneratedStartMsg:
+		// Store the generated encryption keys (always do this, keys are valid)
+		m.encryptionKeyPub = msg.PublicKey[:]
+		m.encryptionKeyPriv = msg.PrivateKey[:]
+
+		// Persist the key to disk
+		m.persistEncryptionKey(msg.PrivateKey[:])
+
+		// Only start the DM if the encryption modal is still active
+		// If user pressed ESC, the modal is gone and we should not proceed
+		if !m.modalStack.HasType(modal.ModalEncryptionSetup) {
+			// Modal was cancelled, just keep the keys but don't start DM
+			return m, nil
+		}
+
+		// Close the encryption setup modal
+		m.modalStack.RemoveByType(modal.ModalEncryptionSetup)
+		// Now start the DM with encryption enabled
+		m.statusMessage = fmt.Sprintf("Starting encrypted DM with %s...", msg.Nickname)
+		return m, m.sendStartDM(msg.TargetType, msg.TargetUserID, msg.Nickname, false)
+
+	case DMDeclinedMsg:
+		// Remove the declined invite from pending list and notify server
+		for i, invite := range m.pendingDMInvites {
+			if invite.ChannelID == msg.ChannelID {
+				m.pendingDMInvites = append(m.pendingDMInvites[:i], m.pendingDMInvites[i+1:]...)
+				break
+			}
+		}
+		// Send decline message to server so initiator gets notified
+		return m, m.sendDeclineDM(msg.ChannelID)
+
+	case DMDeclinedLocalMsg:
+		// We've declined a DM invite and sent it to the server
+		return m, m.setStatus("DM request declined")
+
+	case StartDMSelectedMsg:
+		// User selected someone to DM - close the start DM modal and show encryption choice
+		m.modalStack.RemoveByType(modal.ModalStartDM)
+		m.startDMWithUser(msg.UserID, msg.Nickname)
 		return m, nil
 
 	default:
@@ -413,7 +476,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Special case: ctrl+c always quits immediately
 	if key == "ctrl+c" {
-		return m, tea.Quit
+		return m, m.saveAndQuit()
 	}
 
 	// Check if active modal handles this key
@@ -570,10 +633,13 @@ func (m Model) handleChannelListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.loadingChat = true
 			m.allChatLoaded = false
 			m.chatMessages = nil
+			m.chatTextarea.Reset()
+			m.chatTextarea.Focus()
 			return m, tea.Batch(
 				m.sendJoinChannel(dm.ChannelID),
 				m.requestChatMessages(dm.ChannelID),
 				m.sendSubscribeChannel(dm.ChannelID),
+				textarea.Blink,
 			)
 
 		case ChannelListItemPendingDM:
@@ -588,7 +654,9 @@ func (m Model) handleChannelListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					return m.sendAllowUnencrypted(channelID, false)
 				},
 				OnDecline: func(channelID uint64) tea.Cmd {
-					return nil
+					return func() tea.Msg {
+						return DMDeclinedMsg{ChannelID: channelID}
+					}
 				},
 				OnSetupEncryption: func(channelID uint64) tea.Cmd {
 					return nil
@@ -682,7 +750,7 @@ func (m Model) handleChannelListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.loadingSubchannels = false
 			return m, nil
 		}
-		return m, tea.Quit
+		return m, m.saveAndQuit()
 	}
 
 	return m, nil
@@ -784,7 +852,7 @@ func (m Model) handleThreadListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		if m.currentChannel != nil {
 			cmd = tea.Batch(
-				m.sendLeaveChannel(m.currentChannel.ID),
+				m.sendLeaveChannel(m.currentChannel.ID, false),
 				m.sendUnsubscribeChannel(m.currentChannel.ID),
 			)
 			m.clearActiveChannel()
@@ -858,7 +926,7 @@ func (m Model) handleChatChannelKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.currentChannel != nil {
 			channelID := m.currentChannel.ID
 			cmd = tea.Batch(
-				m.sendLeaveChannel(channelID),
+				m.sendLeaveChannel(channelID, false),
 				m.sendUnsubscribeChannel(channelID),
 			)
 			m.clearActiveChannel()
@@ -869,18 +937,48 @@ func (m Model) handleChatChannelKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.chatTextarea.Blur() // Unfocus when leaving
 		return m, cmd
 
+	case "ctrl+w":
+		// Close DM permanently - remove from sidebar
+		if m.currentChannel != nil && m.isCurrentChannelDM() {
+			channelID := m.currentChannel.ID
+			// Remove from local DM list
+			newDMs := make([]DMChannel, 0, len(m.dmChannels))
+			for _, dm := range m.dmChannels {
+				if dm.ChannelID != channelID {
+					newDMs = append(newDMs, dm)
+				}
+			}
+			m.dmChannels = newDMs
+			// Also remove encryption key if present
+			delete(m.dmChannelKeys, channelID)
+
+			// Return to channel list and send permanent leave
+			m.currentView = ViewChannelList
+			cmd := tea.Batch(
+				m.sendLeaveChannel(channelID, true), // permanent=true
+				m.sendUnsubscribeChannel(channelID),
+			)
+			m.clearActiveChannel()
+			m.currentChannel = nil
+			m.chatMessages = []protocol.Message{}
+			m.chatTextarea.Reset()
+			m.chatTextarea.Blur()
+			return m, cmd
+		}
+		return m, nil
+
 	case "enter":
 		// Send message if input is not empty
 		content := strings.TrimSpace(m.chatTextarea.Value())
 		if content != "" {
 			// Check if we should show registration warning
 			if m.shouldShowRegistrationWarning() {
-				// Store content and show warning
+				// Store content and show warning - use a message to avoid stale closure
 				m.showRegistrationWarningModal(func() tea.Cmd {
-					// Clear textarea and send message when user proceeds
-					m.chatTextarea.Reset()
-					_, cmd := m.sendChatMessageWithContent(content)
-					return cmd
+					// Return a message that Update will handle with current model state
+					return func() tea.Msg {
+						return PostChatMessageMsg{Content: content}
+					}
 				})
 				return m, nil
 			} else {
@@ -1063,6 +1161,10 @@ func (m Model) handleServerFrame(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 		return m.handleDMPending(frame)
 	case protocol.TypeDMRequest:
 		return m.handleDMRequest(frame)
+	case protocol.TypeDMParticipantLeft:
+		return m.handleDMParticipantLeft(frame)
+	case protocol.TypeDMDeclined:
+		return m.handleDMDeclined(frame)
 	}
 
 	// Continue listening
@@ -1071,6 +1173,25 @@ func (m Model) handleServerFrame(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 
 // InitTimeoutCheckMsg triggers periodic checking of initialization timeout
 type InitTimeoutCheckMsg struct{}
+
+// ClearStatusMsg clears the status message after a timeout
+type ClearStatusMsg struct {
+	Version uint64 // Only clear if this matches current statusVersion
+}
+
+// statusTimeout returns a command that clears the status after 3 seconds
+func statusTimeout(version uint64) tea.Cmd {
+	return tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+		return ClearStatusMsg{Version: version}
+	})
+}
+
+// setStatus sets the status message and returns the timeout command
+func (m *Model) setStatus(message string) tea.Cmd {
+	m.statusVersion++
+	m.statusMessage = message
+	return statusTimeout(m.statusVersion)
+}
 
 // handleServerConfig processes SERVER_CONFIG
 func (m Model) handleServerConfig(frame *protocol.Frame) (tea.Model, tea.Cmd) {
@@ -1081,7 +1202,7 @@ func (m Model) handleServerConfig(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	}
 
 	m.serverConfig = msg
-	m.statusMessage = fmt.Sprintf("Connected (protocol v%d)", msg.ProtocolVersion)
+	statusCmd := m.setStatus(fmt.Sprintf("Connected (protocol v%d)", msg.ProtocolVersion))
 
 	// Transition state machine based on connection type
 	m.initStateMachine.OnServerConfig()
@@ -1099,6 +1220,7 @@ func (m Model) handleServerConfig(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 			listenForServerFrames(m.conn, m.connGeneration),
 			m.sendSetNickname(),
 			m.sendGetUserInfo(m.nickname),
+			statusCmd,
 		)
 	}
 
@@ -1106,6 +1228,7 @@ func (m Model) handleServerConfig(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(
 		listenForServerFrames(m.conn, m.connGeneration),
 		checkInitTimeout(m.initStateMachine.NextCheckDelay()),
+		statusCmd,
 	)
 }
 
@@ -1125,6 +1248,7 @@ func (m Model) handleNicknameResponse(frame *protocol.Frame) (tea.Model, tea.Cmd
 		return m, listenForServerFrames(m.conn, m.connGeneration)
 	}
 
+	var statusCmd tea.Cmd
 	if msg.Success {
 		// Use the pending nickname we sent (stored when we sent the request)
 		if m.pendingNickname != "" {
@@ -1132,14 +1256,17 @@ func (m Model) handleNicknameResponse(frame *protocol.Frame) (tea.Model, tea.Cmd
 			m.pendingNickname = "" // Clear it
 		}
 
+		// Try to load any stored encryption key for this nickname/user
+		m.loadEncryptionKey()
+
 		// Show appropriate status message based on auth state
 		if m.authState == AuthStateAuthenticated {
 			// Registered user changed nickname - PRESERVE authenticated state
-			m.statusMessage = fmt.Sprintf("Nickname changed to %s", m.nickname)
+			statusCmd = m.setStatus(fmt.Sprintf("Nickname changed to %s", m.nickname))
 			// DO NOT change m.authState - keep it as AuthStateAuthenticated
 		} else {
 			// Anonymous user set nickname (may prompt for auth if registered)
-			m.statusMessage = fmt.Sprintf("Nickname set to %s", m.nickname)
+			statusCmd = m.setStatus(fmt.Sprintf("Nickname set to %s", m.nickname))
 			// Set auth state to anonymous (allows registration with Ctrl+R)
 			// This may change later if USER_INFO shows nickname is registered
 			m.authState = AuthStateAnonymous
@@ -1153,7 +1280,7 @@ func (m Model) handleNicknameResponse(frame *protocol.Frame) (tea.Model, tea.Cmd
 		m.errorMessage = msg.Message
 	}
 
-	return m, listenForServerFrames(m.conn, m.connGeneration)
+	return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), statusCmd)
 }
 
 // handleUserInfo processes USER_INFO response
@@ -1254,35 +1381,40 @@ func (m Model) handleAuthResponse(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 			m.state.SetLastNickname(msg.Nickname)
 		}
 
-		m.statusMessage = fmt.Sprintf("Authenticated as %s", m.nickname)
+		statusCmd := m.setStatus(fmt.Sprintf("Authenticated as %s", m.nickname))
 
 		// Save user ID to state
 		m.state.SetUserID(&msg.UserID)
 
+		// Try to load any stored encryption key for this user
+		m.loadEncryptionKey()
+
 		// Close password modal if it's open
 		m.modalStack.RemoveByType(modal.ModalPasswordAuth)
-	} else {
-		m.userFlags = 0
-		// Authentication failed
-		m.authState = AuthStatePrompting
-		m.authAttempts++
-		m.authErrorMessage = msg.Message
 
-		// Apply rate limiting with exponential backoff
-		if m.authAttempts >= 5 {
-			m.errorMessage = "Too many failed attempts. Please restart the application."
-			m.authState = AuthStateFailed
-			m.modalStack.RemoveByType(modal.ModalPasswordAuth)
-		} else {
-			if m.authAttempts >= 2 {
-				// Exponential backoff: 1s, 2s, 4s, 8s
-				cooldownSeconds := 1 << (m.authAttempts - 2) // 2^(attempts-2)
-				m.authCooldownUntil = time.Now().Add(time.Duration(cooldownSeconds) * time.Second)
-			}
-			// Update password modal with error message
-			m.modalStack.RemoveByType(modal.ModalPasswordAuth)
-			m.showPasswordModal()
+		return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), statusCmd)
+	}
+
+	m.userFlags = 0
+	// Authentication failed
+	m.authState = AuthStatePrompting
+	m.authAttempts++
+	m.authErrorMessage = msg.Message
+
+	// Apply rate limiting with exponential backoff
+	if m.authAttempts >= 5 {
+		m.errorMessage = "Too many failed attempts. Please restart the application."
+		m.authState = AuthStateFailed
+		m.modalStack.RemoveByType(modal.ModalPasswordAuth)
+	} else {
+		if m.authAttempts >= 2 {
+			// Exponential backoff: 1s, 2s, 4s, 8s
+			cooldownSeconds := 1 << (m.authAttempts - 2) // 2^(attempts-2)
+			m.authCooldownUntil = time.Now().Add(time.Duration(cooldownSeconds) * time.Second)
 		}
+		// Update password modal with error message
+		m.modalStack.RemoveByType(modal.ModalPasswordAuth)
+		m.showPasswordModal()
 	}
 
 	return m, listenForServerFrames(m.conn, m.connGeneration)
@@ -1296,12 +1428,13 @@ func (m Model) handleRegisterResponse(frame *protocol.Frame) (tea.Model, tea.Cmd
 		return m, listenForServerFrames(m.conn, m.connGeneration)
 	}
 
+	var statusCmd tea.Cmd
 	if msg.Success {
 		// Successfully registered
 		m.authState = AuthStateAuthenticated
 		m.userID = &msg.UserID
 		m.userFlags = 0
-		m.statusMessage = fmt.Sprintf("Registered as %s", m.nickname)
+		statusCmd = m.setStatus(fmt.Sprintf("Registered as %s", m.nickname))
 
 		// Save user ID to state
 		m.state.SetUserID(&msg.UserID)
@@ -1315,7 +1448,7 @@ func (m Model) handleRegisterResponse(frame *protocol.Frame) (tea.Model, tea.Cmd
 		m.errorMessage = "Registration failed. Please try again."
 	}
 
-	return m, listenForServerFrames(m.conn, m.connGeneration)
+	return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), statusCmd)
 }
 
 // handleChannelList processes CHANNEL_LIST
@@ -1329,9 +1462,9 @@ func (m Model) handleChannelList(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	}
 
 	m.channels = msg.Channels
-	m.statusMessage = fmt.Sprintf("Loaded %d channels", len(m.channels))
+	statusCmd := m.setStatus(fmt.Sprintf("Loaded %d channels", len(m.channels)))
 
-	// Request unread counts for all channels (server will use stored state for registered users)
+	// Request unread counts for all channels
 	if len(m.channels) > 0 {
 		targets := make([]protocol.UnreadTarget, len(m.channels))
 		for i, channel := range m.channels {
@@ -1342,8 +1475,22 @@ func (m Model) handleChannelList(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		var sinceTimestamp *int64
+		if m.userID == nil {
+			// Anonymous user: use locally stored last seen timestamp
+			lastSeen := m.state.GetLastSeenTimestamp()
+			if lastSeen > 0 {
+				sinceTimestamp = &lastSeen
+			}
+			// If no last seen timestamp, skip the request (first time user)
+			if sinceTimestamp == nil {
+				return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), statusCmd)
+			}
+		}
+		// For registered users, sinceTimestamp stays nil and server uses stored UserChannelState
+
 		unreadMsg := &protocol.GetUnreadCountsMessage{
-			SinceTimestamp: nil, // Server uses stored UserChannelState for registered users
+			SinceTimestamp: sinceTimestamp,
 			Targets:        targets,
 		}
 
@@ -1352,7 +1499,7 @@ func (m Model) handleChannelList(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	return m, listenForServerFrames(m.conn, m.connGeneration)
+	return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), statusCmd)
 }
 
 // handleSubchannelList processes SUBCHANNEL_LIST (0x96)
@@ -1381,8 +1528,9 @@ func (m Model) handleSubchannelCreated(frame *protocol.Frame) (tea.Model, tea.Cm
 		return m, listenForServerFrames(m.conn, m.connGeneration)
 	}
 
+	var statusCmd tea.Cmd
 	if msg.Success {
-		m.statusMessage = msg.Message
+		statusCmd = m.setStatus(msg.Message)
 
 		// If the parent channel is currently expanded, add the new subchannel to the list
 		if m.expandedChannelID != nil && *m.expandedChannelID == msg.ChannelID {
@@ -1408,7 +1556,7 @@ func (m Model) handleSubchannelCreated(frame *protocol.Frame) (tea.Model, tea.Cm
 		m.errorMessage = msg.Message
 	}
 
-	return m, listenForServerFrames(m.conn, m.connGeneration)
+	return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), statusCmd)
 }
 
 // handleServerList processes SERVER_LIST (0x9B)
@@ -1430,30 +1578,33 @@ func (m Model) handleServerList(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	// Clear awaiting flag since we got a response
 	m.awaitingServerList = false
 
+	var statusCmd tea.Cmd
 	// Update the server selector modal with the received list
 	if activeModal := m.modalStack.Top(); activeModal != nil {
 		if serverModal, ok := activeModal.(*modal.ServerSelectorModal); ok {
 			serverModal.SetServers(msg.Servers)
 
 			if len(msg.Servers) == 0 {
-				m.statusMessage = "No servers available"
+				statusCmd = m.setStatus("No servers available")
 			} else {
-				m.statusMessage = fmt.Sprintf("Loaded %d servers", len(msg.Servers))
+				statusCmd = m.setStatus(fmt.Sprintf("Loaded %d servers", len(msg.Servers)))
 			}
 		}
 	}
 
-	return m, listenForServerFrames(m.conn, m.connGeneration)
+	return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), statusCmd)
 }
 
 // handleChannelCreated processes CHANNEL_CREATED (response + broadcast)
 func (m Model) handleChannelCreated(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.ChannelCreatedMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
+		m.statusMessage = "" // Clear in-progress status
 		m.errorMessage = fmt.Sprintf("Failed to decode channel created: %v", err)
 		return m, listenForServerFrames(m.conn, m.connGeneration)
 	}
 
+	var statusCmd tea.Cmd
 	if msg.Success {
 		// Close the create channel modal if it's open
 		m.modalStack.RemoveByType(modal.ModalCreateChannel)
@@ -1470,23 +1621,26 @@ func (m Model) handleChannelCreated(frame *protocol.Frame) (tea.Model, tea.Cmd) 
 		}
 		m.channels = append(m.channels, newChannel)
 
-		m.statusMessage = fmt.Sprintf("Channel '%s' created successfully", msg.Name)
+		statusCmd = m.setStatus(fmt.Sprintf("Channel '%s' created successfully", msg.Name))
 	} else {
 		// Keep modal open but show error
+		m.statusMessage = "" // Clear in-progress status
 		m.errorMessage = msg.Message
 	}
 
-	return m, listenForServerFrames(m.conn, m.connGeneration)
+	return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), statusCmd)
 }
 
 // handleChannelDeleted processes CHANNEL_DELETED (response + broadcast)
 func (m Model) handleChannelDeleted(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.ChannelDeletedMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
+		m.statusMessage = "" // Clear in-progress status
 		m.errorMessage = fmt.Sprintf("Failed to decode channel deleted: %v", err)
 		return m, listenForServerFrames(m.conn, m.connGeneration)
 	}
 
+	var statusCmd tea.Cmd
 	if msg.Success {
 		// Close the delete channel modal if it's open
 		m.modalStack.RemoveByType(modal.ModalDeleteChannel)
@@ -1510,13 +1664,14 @@ func (m Model) handleChannelDeleted(frame *protocol.Frame) (tea.Model, tea.Cmd) 
 			}
 		}
 
-		m.statusMessage = msg.Message
+		statusCmd = m.setStatus(msg.Message)
 	} else {
 		// Keep modal open but show error
+		m.statusMessage = "" // Clear in-progress status
 		m.errorMessage = msg.Message
 	}
 
-	return m, listenForServerFrames(m.conn, m.connGeneration)
+	return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), statusCmd)
 }
 
 // handleJoinResponse processes JOIN_RESPONSE
@@ -1528,18 +1683,17 @@ func (m Model) handleJoinResponse(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	}
 
 	if msg.Success {
-		m.statusMessage = msg.Message
+		statusCmd := m.setStatus(msg.Message)
 		m.setActiveChannel(msg.ChannelID)
-		cmds := []tea.Cmd{listenForServerFrames(m.conn, m.connGeneration)}
+		cmds := []tea.Cmd{listenForServerFrames(m.conn, m.connGeneration), statusCmd}
 		if m.showUserSidebar {
 			cmds = append(cmds, m.sendListChannelUsers(msg.ChannelID))
 			cmds = append(cmds, func() tea.Msg { return ForceRenderMsg{} })
 		}
 		return m, tea.Batch(cmds...)
-	} else {
-		m.errorMessage = msg.Message
 	}
 
+	m.errorMessage = msg.Message
 	return m, listenForServerFrames(m.conn, m.connGeneration)
 }
 
@@ -1551,15 +1705,16 @@ func (m Model) handleLeaveResponse(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 		return m, listenForServerFrames(m.conn, m.connGeneration)
 	}
 
+	var statusCmd tea.Cmd
 	if msg.Success {
-		m.statusMessage = msg.Message
+		statusCmd = m.setStatus(msg.Message)
 		m.clearActiveChannel()
 		delete(m.channelRoster, msg.ChannelID)
 	} else {
 		m.errorMessage = msg.Message
 	}
 
-	return m, listenForServerFrames(m.conn, m.connGeneration)
+	return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), statusCmd)
 }
 
 // handleMessageList processes MESSAGE_LIST
@@ -1590,6 +1745,7 @@ func (m Model) handleMessageList(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	var statusCmd tea.Cmd
 	if msg.ParentID == nil {
 		// Root messages - could be thread list OR chat messages
 		// Check if we're in chat view
@@ -1604,7 +1760,7 @@ func (m Model) handleMessageList(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 			})
 
 			m.allChatLoaded = len(msg.Messages) < 100
-			m.statusMessage = fmt.Sprintf("Loaded %d messages", len(m.chatMessages))
+			statusCmd = m.setStatus(fmt.Sprintf("Loaded %d messages", len(m.chatMessages)))
 
 			// Update viewport to show loaded messages
 			m.chatViewport.SetContent(m.buildChatMessages())
@@ -1625,12 +1781,12 @@ func (m Model) handleMessageList(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 					m.allThreadsLoaded = true
 				}
 
-				m.statusMessage = fmt.Sprintf("Loaded %d more threads", len(msg.Messages))
+				statusCmd = m.setStatus(fmt.Sprintf("Loaded %d more threads", len(msg.Messages)))
 			} else {
 				// Initial load - replace threads
 				m.threads = msg.Messages
 				m.allThreadsLoaded = len(msg.Messages) < 25
-				m.statusMessage = fmt.Sprintf("Loaded %d threads", len(m.threads))
+				statusCmd = m.setStatus(fmt.Sprintf("Loaded %d threads", len(m.threads)))
 			}
 
 			// Update viewport to show loaded threads
@@ -1655,17 +1811,17 @@ func (m Model) handleMessageList(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 					m.allRepliesLoaded = true
 				}
 
-				m.statusMessage = fmt.Sprintf("Loaded %d more replies", len(newReplies))
+				statusCmd = m.setStatus(fmt.Sprintf("Loaded %d more replies", len(newReplies)))
 			} else if cachedReplies, ok := m.threadRepliesCache[m.currentThread.ID]; ok && len(newReplies) > 0 {
 				// Incremental update: merge cached and new replies
 				merged := append(cachedReplies, newReplies...)
 				m.threadReplies = client.SortThreadReplies(merged, m.currentThread.ID)
-				m.statusMessage = fmt.Sprintf("Loaded %d new replies", len(newReplies))
+				statusCmd = m.setStatus(fmt.Sprintf("Loaded %d new replies", len(newReplies)))
 			} else {
 				// Initial load: replace replies
 				m.threadReplies = client.SortThreadReplies(msg.Messages, m.currentThread.ID)
 				m.allRepliesLoaded = len(msg.Messages) < 10
-				m.statusMessage = fmt.Sprintf("Loaded %d replies", len(m.threadReplies))
+				statusCmd = m.setStatus(fmt.Sprintf("Loaded %d replies", len(m.threadReplies)))
 			}
 
 			// Cache the sorted replies
@@ -1683,14 +1839,14 @@ func (m Model) handleMessageList(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 			}
 		} else {
 			m.threadReplies = msg.Messages
-			m.statusMessage = fmt.Sprintf("Loaded %d replies", len(m.threadReplies))
+			statusCmd = m.setStatus(fmt.Sprintf("Loaded %d replies", len(m.threadReplies)))
 		}
 
 		// Update viewport to show loaded replies
 		m.threadViewport.SetContent(m.buildThreadContent())
 	}
 
-	return m, listenForServerFrames(m.conn, m.connGeneration)
+	return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), statusCmd)
 }
 
 // handleMessagePosted processes MESSAGE_POSTED
@@ -1699,21 +1855,24 @@ func (m Model) handleMessagePosted(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 
 	msg := &protocol.MessagePostedMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
+		m.statusMessage = "" // Clear "Sending..." status
 		m.errorMessage = fmt.Sprintf("Failed to decode response: %v", err)
 		return m, listenForServerFrames(m.conn, m.connGeneration)
 	}
 
+	var statusCmd tea.Cmd
 	if msg.Success {
-		m.statusMessage = "Message posted"
+		statusCmd = m.setStatus("Message posted")
 
 		// Don't request message lists - rely on NEW_MESSAGE broadcasts instead
 		// The server will broadcast our message to us as a subscriber, and handleNewMessage
 		// will add it to the appropriate list (threads or threadReplies)
 	} else {
+		m.statusMessage = "" // Clear "Sending..." status
 		m.errorMessage = msg.Message
 	}
 
-	return m, listenForServerFrames(m.conn, m.connGeneration)
+	return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), statusCmd)
 }
 
 // handleNewMessage processes NEW_MESSAGE broadcasts
@@ -1861,14 +2020,15 @@ func (m Model) handleMessageDeleted(frame *protocol.Frame) (tea.Model, tea.Cmd) 
 		return m, listenForServerFrames(m.conn, m.connGeneration)
 	}
 
+	var statusCmd tea.Cmd
 	if msg.Success {
 		m.applyMessageDeletion(msg.MessageID, msg.Message)
-		m.statusMessage = "Message deleted"
+		statusCmd = m.setStatus("Message deleted")
 	} else {
 		m.errorMessage = msg.Message
 	}
 
-	return m, listenForServerFrames(m.conn, m.connGeneration)
+	return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), statusCmd)
 }
 
 // handleMessageEdited processes MESSAGE_EDITED confirmations and broadcasts.
@@ -1881,14 +2041,15 @@ func (m Model) handleMessageEdited(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 		return m, listenForServerFrames(m.conn, m.connGeneration)
 	}
 
+	var statusCmd tea.Cmd
 	if msg.Success {
 		m.applyMessageEdit(msg.MessageID, msg.NewContent, msg.EditedAt)
-		m.statusMessage = "Message edited"
+		statusCmd = m.setStatus("Message edited")
 	} else {
 		m.errorMessage = msg.Message
 	}
 
-	return m, listenForServerFrames(m.conn, m.connGeneration)
+	return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), statusCmd)
 }
 
 // handleSubscribeOk processes SUBSCRIBE_OK confirmations
@@ -2211,7 +2372,7 @@ func (m Model) sendJoinChannel(channelID uint64) tea.Cmd {
 	}
 }
 
-func (m Model) sendLeaveChannel(channelID uint64) tea.Cmd {
+func (m Model) sendLeaveChannel(channelID uint64, permanent bool) tea.Cmd {
 	return func() tea.Msg {
 		if channelID == 0 {
 			return nil
@@ -2243,6 +2404,7 @@ func (m Model) sendLeaveChannel(channelID uint64) tea.Cmd {
 		msg := &protocol.LeaveChannelMessage{
 			ChannelID:    channelID,
 			SubchannelID: nil,
+			Permanent:    permanent,
 		}
 		if err := m.conn.SendMessage(protocol.TypeLeaveChannel, msg); err != nil {
 			return ErrorMsg{Err: err}
@@ -2613,10 +2775,12 @@ func (m Model) handleReconnected() (tea.Model, tea.Cmd) {
 	m.connectionState = StateConnected
 	m.reconnectAttempt = 0
 	m.errorMessage = ""
-	m.statusMessage = "Reconnected successfully"
 
 	// Re-request data based on current view
-	cmds := []tea.Cmd{listenForServerFrames(m.conn, m.connGeneration)}
+	cmds := []tea.Cmd{
+		listenForServerFrames(m.conn, m.connGeneration),
+		m.setStatus("Reconnected successfully"),
+	}
 
 	// Re-send nickname if we have one (but not if already authenticated - SSH already set it)
 	if m.nickname != "" && m.authState != AuthStateAuthenticated {
@@ -2677,12 +2841,12 @@ func (m Model) handleServerSelected(server protocol.ServerInfo) (tea.Model, tea.
 		}
 		// Just update state and proceed with normal chat flow
 		m.directoryMode = false
-		m.statusMessage = fmt.Sprintf("Connected to %s", server.Name)
 		m.modalStack.Pop()
 
 		// Start normal operation
 		cmds := []tea.Cmd{
 			m.requestChannelList(),
+			m.setStatus(fmt.Sprintf("Connected to %s", server.Name)),
 		}
 
 		// Send nickname if we have one (but not if already authenticated)
@@ -2762,7 +2926,6 @@ func (m Model) handleServerSelected(server protocol.ServerInfo) (tea.Model, tea.
 	m.conn = conn
 	m.connectionState = StateConnected
 	m.directoryMode = false
-	m.statusMessage = fmt.Sprintf("Connected to %s", server.Name)
 
 	// Save successful connection method for future use
 	// Check the actual connection address to distinguish between ws:// and wss://
@@ -2786,6 +2949,7 @@ func (m Model) handleServerSelected(server protocol.ServerInfo) (tea.Model, tea.
 	cmds := []tea.Cmd{
 		listenForServerFrames(m.conn, m.connGeneration),
 		m.requestChannelList(),
+		m.setStatus(fmt.Sprintf("Connected to %s", server.Name)),
 	}
 
 	// Send nickname if we have one (but not if already authenticated)
@@ -2849,7 +3013,6 @@ func (m Model) handleConnectionRetry() (tea.Model, tea.Cmd) {
 
 	// Connection successful!
 	m.connectionState = StateConnected
-	m.statusMessage = "Connected successfully"
 	if m.logger != nil {
 		m.logger.Printf("Retry connection succeeded")
 	}
@@ -2873,6 +3036,7 @@ func (m Model) handleConnectionRetry() (tea.Model, tea.Cmd) {
 	cmds := []tea.Cmd{
 		listenForServerFrames(m.conn, m.connGeneration),
 		m.requestChannelList(),
+		m.setStatus("Connected successfully"),
 	}
 
 	// Send nickname if we have one (but not if already authenticated)
@@ -3054,7 +3218,6 @@ func (m Model) handleConnectionAttemptResult(msg ConnectionAttemptResultMsg) (te
 	// Connection successful!
 	m.switchingMethod = false // Clear flag on success
 	m.connectionState = StateConnected
-	m.statusMessage = fmt.Sprintf("Connected via %s", msg.Method)
 	if m.logger != nil {
 		m.logger.Printf("Connection with method %s succeeded", msg.Method)
 	}
@@ -3070,6 +3233,7 @@ func (m Model) handleConnectionAttemptResult(msg ConnectionAttemptResultMsg) (te
 	cmds := []tea.Cmd{
 		listenForServerFrames(m.conn, m.connGeneration),
 		m.requestChannelList(),
+		m.setStatus(fmt.Sprintf("Connected via %s", msg.Method)),
 	}
 
 	// Send nickname if we have one (but not if already authenticated)
@@ -3122,13 +3286,13 @@ func (m Model) handleSSHKeyAdded(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	}
 
 	if msg.Success {
-		m.statusMessage = fmt.Sprintf("SSH key added: %s", msg.Fingerprint)
+		statusCmd := m.setStatus(fmt.Sprintf("SSH key added: %s", msg.Fingerprint))
 		// Refresh the key list
-		return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), m.sendListSSHKeys())
-	} else {
-		m.errorMessage = msg.ErrorMessage
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), m.sendListSSHKeys(), statusCmd)
 	}
+
+	m.errorMessage = msg.ErrorMessage
+	return m, listenForServerFrames(m.conn, m.connGeneration)
 }
 
 func (m Model) handleSSHKeyLabelUpdated(frame *protocol.Frame) (tea.Model, tea.Cmd) {
@@ -3139,13 +3303,13 @@ func (m Model) handleSSHKeyLabelUpdated(frame *protocol.Frame) (tea.Model, tea.C
 	}
 
 	if msg.Success {
-		m.statusMessage = "SSH key label updated"
+		statusCmd := m.setStatus("SSH key label updated")
 		// Refresh the key list
-		return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), m.sendListSSHKeys())
-	} else {
-		m.errorMessage = msg.ErrorMessage
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), m.sendListSSHKeys(), statusCmd)
 	}
+
+	m.errorMessage = msg.ErrorMessage
+	return m, listenForServerFrames(m.conn, m.connGeneration)
 }
 
 func (m Model) handleSSHKeyDeleted(frame *protocol.Frame) (tea.Model, tea.Cmd) {
@@ -3156,9 +3320,9 @@ func (m Model) handleSSHKeyDeleted(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	}
 
 	if msg.Success {
-		m.statusMessage = "SSH key deleted"
+		statusCmd := m.setStatus("SSH key deleted")
 		// Refresh the key list
-		return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), m.sendListSSHKeys())
+		return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), m.sendListSSHKeys(), statusCmd)
 	} else {
 		m.errorMessage = msg.ErrorMessage
 		return m, listenForServerFrames(m.conn, m.connGeneration)
@@ -3290,78 +3454,108 @@ func (m Model) sendAllowUnencrypted(dmChannelID uint64, permanent bool) tea.Cmd 
 	}
 }
 
+func (m Model) sendDeclineDM(dmChannelID uint64) tea.Cmd {
+	return func() tea.Msg {
+		msg := &protocol.DeclineDMMessage{
+			DMChannelID: dmChannelID,
+		}
+		if err := m.conn.SendMessage(protocol.TypeDeclineDM, msg); err != nil {
+			return ErrorMsg{Err: err}
+		}
+		// Return a local message to remove from pending list
+		return DMDeclinedLocalMsg{ChannelID: dmChannelID}
+	}
+}
+
+// DMDeclinedLocalMsg is sent when we decline a DM (local action, before server confirms)
+type DMDeclinedLocalMsg struct {
+	ChannelID uint64
+}
+
 // Admin response handlers
 
 func (m Model) handleUserBanned(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.UserBannedMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
+		m.statusMessage = "" // Clear in-progress status
 		m.errorMessage = fmt.Sprintf("Failed to decode USER_BANNED: %v", err)
 		return m, listenForServerFrames(m.conn, m.connGeneration)
 	}
 
+	var statusCmd tea.Cmd
 	if msg.Success {
-		m.statusMessage = msg.Message
+		statusCmd = m.setStatus(msg.Message)
 		// Close the ban user modal
 		m.modalStack.RemoveByType(modal.ModalBanUser)
 	} else {
+		m.statusMessage = "" // Clear in-progress status
 		m.errorMessage = msg.Message
 	}
 
-	return m, listenForServerFrames(m.conn, m.connGeneration)
+	return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), statusCmd)
 }
 
 func (m Model) handleIPBanned(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.IPBannedMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
+		m.statusMessage = "" // Clear in-progress status
 		m.errorMessage = fmt.Sprintf("Failed to decode IP_BANNED: %v", err)
 		return m, listenForServerFrames(m.conn, m.connGeneration)
 	}
 
+	var statusCmd tea.Cmd
 	if msg.Success {
-		m.statusMessage = msg.Message
+		statusCmd = m.setStatus(msg.Message)
 		// Close the ban IP modal
 		m.modalStack.RemoveByType(modal.ModalBanIP)
 	} else {
+		m.statusMessage = "" // Clear in-progress status
 		m.errorMessage = msg.Message
 	}
 
-	return m, listenForServerFrames(m.conn, m.connGeneration)
+	return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), statusCmd)
 }
 
 func (m Model) handleUserUnbanned(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.UserUnbannedMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
+		m.statusMessage = "" // Clear in-progress status
 		m.errorMessage = fmt.Sprintf("Failed to decode USER_UNBANNED: %v", err)
 		return m, listenForServerFrames(m.conn, m.connGeneration)
 	}
 
+	var statusCmd tea.Cmd
 	if msg.Success {
-		m.statusMessage = msg.Message
+		statusCmd = m.setStatus(msg.Message)
 		// Close the unban modal
 		m.modalStack.RemoveByType(modal.ModalUnban)
 	} else {
+		m.statusMessage = "" // Clear in-progress status
 		m.errorMessage = msg.Message
 	}
 
-	return m, listenForServerFrames(m.conn, m.connGeneration)
+	return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), statusCmd)
 }
 
 func (m Model) handleIPUnbanned(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.IPUnbannedMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
+		m.statusMessage = "" // Clear in-progress status
 		m.errorMessage = fmt.Sprintf("Failed to decode IP_UNBANNED: %v", err)
 		return m, listenForServerFrames(m.conn, m.connGeneration)
 	}
 
+	var statusCmd tea.Cmd
 	if msg.Success {
-		m.statusMessage = msg.Message
+		statusCmd = m.setStatus(msg.Message)
 		// Close the unban modal
 		m.modalStack.RemoveByType(modal.ModalUnban)
 	} else {
+		m.statusMessage = "" // Clear in-progress status
 		m.errorMessage = msg.Message
 	}
 
-	return m, listenForServerFrames(m.conn, m.connGeneration)
+	return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), statusCmd)
 }
 
 func (m Model) handleBanList(frame *protocol.Frame) (tea.Model, tea.Cmd) {
@@ -3510,17 +3704,19 @@ func (m Model) handleChannelPresence(frame *protocol.Frame) (tea.Model, tea.Cmd)
 		}
 	}
 
+	var statusCmd tea.Cmd
 	if m.hasActiveChannel && m.activeChannelID == msg.ChannelID && m.currentChannel != nil {
 		action := "left"
 		if msg.Joined {
 			action = "joined"
 		}
-		m.statusMessage = fmt.Sprintf("%s has %s %s", entry.Nickname, action, m.currentChannel.Name)
+		statusCmd = m.setStatus(fmt.Sprintf("%s has %s %s", entry.Nickname, action, m.currentChannel.Name))
 	}
 
 	cmd := tea.Batch(
 		listenForServerFrames(m.conn, m.connGeneration),
 		func() tea.Msg { return ForceRenderMsg{} },
+		statusCmd,
 	)
 	return m, cmd
 }
@@ -3575,6 +3771,7 @@ func (m Model) handleUnreadCounts(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 func (m Model) handleUserDeleted(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.UserDeletedMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
+		m.statusMessage = "" // Clear in-progress status
 		m.errorMessage = fmt.Sprintf("Failed to decode USER_DELETED: %v", err)
 		return m, listenForServerFrames(m.conn, m.connGeneration)
 	}
@@ -3582,11 +3779,12 @@ func (m Model) handleUserDeleted(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	cmds := []tea.Cmd{listenForServerFrames(m.conn, m.connGeneration)}
 
 	if msg.Success {
-		m.statusMessage = msg.Message
+		cmds = append(cmds, m.setStatus(msg.Message))
 		// Close the delete user modal
 		m.modalStack.RemoveByType(modal.ModalDeleteUser)
 		cmds = append(cmds, m.sendListUsers(true))
 	} else {
+		m.statusMessage = "" // Clear in-progress status
 		m.errorMessage = msg.Message
 	}
 
@@ -3674,17 +3872,27 @@ func (m Model) handleDMReady(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 		m.dmChannels = append(m.dmChannels, dmChannel)
 	}
 
-	// Remove any pending invite for this channel
+	// Remove any pending invite from this user (incoming)
+	// Note: We match by nickname because the invite's "ChannelID" is actually the invite ID,
+	// not the channel ID that DM_READY returns
 	for i, invite := range m.pendingDMInvites {
-		if invite.ChannelID == msg.ChannelID {
+		if invite.FromNickname == msg.OtherNickname {
 			m.pendingDMInvites = append(m.pendingDMInvites[:i], m.pendingDMInvites[i+1:]...)
 			break
 		}
 	}
 
-	m.statusMessage = fmt.Sprintf("DM with %s is ready", msg.OtherNickname)
+	// Remove any outgoing invite to this user
+	for i, invite := range m.outgoingDMInvites {
+		if invite.ToNickname == msg.OtherNickname {
+			m.outgoingDMInvites = append(m.outgoingDMInvites[:i], m.outgoingDMInvites[i+1:]...)
+			break
+		}
+	}
 
-	return m, listenForServerFrames(m.conn, m.connGeneration)
+	statusCmd := m.setStatus(fmt.Sprintf("DM with %s is ready", msg.OtherNickname))
+
+	return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), statusCmd)
 }
 
 func (m Model) handleDMPending(frame *protocol.Frame) (tea.Model, tea.Cmd) {
@@ -3699,10 +3907,28 @@ func (m Model) handleDMPending(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 			msg.DMChannelID, msg.WaitingForNickname, msg.Reason)
 	}
 
-	// Show status that we're waiting for the other user
-	m.statusMessage = fmt.Sprintf("Waiting for %s: %s", msg.WaitingForNickname, msg.Reason)
+	// Add to outgoing invites list (avoid duplicates)
+	found := false
+	for i, existing := range m.outgoingDMInvites {
+		if existing.InviteID == msg.DMChannelID {
+			m.outgoingDMInvites[i].ToNickname = msg.WaitingForNickname
+			m.outgoingDMInvites[i].ToUserID = msg.WaitingForUserID
+			found = true
+			break
+		}
+	}
+	if !found {
+		m.outgoingDMInvites = append(m.outgoingDMInvites, OutgoingDMInvite{
+			InviteID:   msg.DMChannelID,
+			ToUserID:   msg.WaitingForUserID,
+			ToNickname: msg.WaitingForNickname,
+		})
+	}
 
-	return m, listenForServerFrames(m.conn, m.connGeneration)
+	// Show status that we're waiting for the other user
+	statusCmd := m.setStatus(fmt.Sprintf("Waiting for %s to accept...", msg.WaitingForNickname))
+
+	return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), statusCmd)
 }
 
 func (m Model) handleDMRequest(frame *protocol.Frame) (tea.Model, tea.Cmd) {
@@ -3753,10 +3979,9 @@ func (m Model) handleDMRequest(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 			return m.sendAllowUnencrypted(channelID, false)
 		},
 		OnDecline: func(channelID uint64) tea.Cmd {
-			// Remove from pending invites
-			// Note: The actual decline is handled by just closing the modal
-			// The invite will expire on server side
-			return nil
+			return func() tea.Msg {
+				return DMDeclinedMsg{ChannelID: channelID}
+			}
 		},
 		OnSetupEncryption: func(channelID uint64) tea.Cmd {
 			// TODO: Show encryption setup modal
@@ -3766,6 +3991,72 @@ func (m Model) handleDMRequest(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	m.modalStack.Push(dmModal)
 
 	return m, listenForServerFrames(m.conn, m.connGeneration)
+}
+
+func (m Model) handleDMParticipantLeft(frame *protocol.Frame) (tea.Model, tea.Cmd) {
+	msg := &protocol.DMParticipantLeftMessage{}
+	if err := msg.Decode(frame.Payload); err != nil {
+		m.errorMessage = fmt.Sprintf("Failed to decode DM_PARTICIPANT_LEFT: %v", err)
+		return m, listenForServerFrames(m.conn, m.connGeneration)
+	}
+
+	if m.logger != nil {
+		m.logger.Printf("[DM] Participant left: channel=%d, nickname=%s", msg.DMChannelID, msg.Nickname)
+	}
+
+	// Mark the DM channel as having lost its participant
+	for i, dm := range m.dmChannels {
+		if dm.ChannelID == msg.DMChannelID {
+			m.dmChannels[i].ParticipantLeft = true
+			break
+		}
+	}
+
+	// If currently viewing this DM channel, add a system message to the chat
+	if m.currentChannel != nil && m.currentChannel.ID == msg.DMChannelID {
+		// Add a synthetic system message
+		systemMsg := protocol.Message{
+			ID:             0, // System messages use ID 0
+			ChannelID:      msg.DMChannelID,
+			AuthorNickname: "", // Empty author indicates system message
+			Content:        fmt.Sprintf("⚠️ %s has left the conversation", msg.Nickname),
+			CreatedAt:      time.Now(),
+		}
+		m.chatMessages = append(m.chatMessages, systemMsg)
+		// Rebuild viewport content and scroll to show new message
+		m.chatViewport.SetContent(m.buildChatMessages())
+		m.chatViewport.GotoBottom()
+	}
+
+	// Show a status message
+	statusCmd := m.setStatus(fmt.Sprintf("%s has left the DM conversation", msg.Nickname))
+
+	return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), statusCmd)
+}
+
+func (m Model) handleDMDeclined(frame *protocol.Frame) (tea.Model, tea.Cmd) {
+	msg := &protocol.DMDeclinedMessage{}
+	if err := msg.Decode(frame.Payload); err != nil {
+		m.errorMessage = fmt.Sprintf("Failed to decode DM_DECLINED: %v", err)
+		return m, listenForServerFrames(m.conn, m.connGeneration)
+	}
+
+	if m.logger != nil {
+		m.logger.Printf("[DM] DM_DECLINED: channel=%d, nickname=%s", msg.DMChannelID, msg.Nickname)
+	}
+
+	// Remove from outgoing invites list
+	for i, invite := range m.outgoingDMInvites {
+		if invite.InviteID == msg.DMChannelID {
+			m.outgoingDMInvites = append(m.outgoingDMInvites[:i], m.outgoingDMInvites[i+1:]...)
+			break
+		}
+	}
+
+	// Show a status message with timeout
+	statusCmd := m.setStatus(fmt.Sprintf("%s declined your DM request", msg.Nickname))
+
+	return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), statusCmd)
 }
 
 // showEncryptionSetupModal displays the modal for setting up encryption
@@ -3810,14 +4101,19 @@ func (m *Model) generateAndSendEncryptionKey(dmChannelID *uint64) tea.Cmd {
 			return ErrorMsg{Err: fmt.Errorf("failed to generate encryption key: %w", err)}
 		}
 
-		// Store the public key locally (we'll need it for reference)
-		// Note: The model will be updated when this command returns
-		// For now, we just send the key to the server
+		// Determine key type based on user registration status
+		// Anonymous users can only use ephemeral (session-only) keys
+		var keyType uint8 = protocol.KeyTypeGenerated
+		label := "generated"
+		if m.userID == nil {
+			keyType = protocol.KeyTypeEphemeral
+			label = "ephemeral"
+		}
 
 		msg := &protocol.ProvidePublicKeyMessage{
-			KeyType:   protocol.KeyTypeGenerated,
+			KeyType:   keyType,
 			PublicKey: kp.PublicKey,
-			Label:     "generated",
+			Label:     label,
 		}
 		if err := m.conn.SendMessage(protocol.TypeProvidePublicKey, msg); err != nil {
 			return ErrorMsg{Err: err}
@@ -3844,6 +4140,11 @@ func (m *Model) deriveAndSendEncryptionKeyFromSSH(dmChannelID *uint64) tea.Cmd {
 type EncryptionKeyGeneratedMsg struct {
 	PublicKey  [32]byte
 	PrivateKey [32]byte
+}
+
+// DMDeclinedMsg is sent when user declines a DM request
+type DMDeclinedMsg struct {
+	ChannelID uint64
 }
 
 // shouldNotifyForMessage checks if we should send a desktop notification for this message

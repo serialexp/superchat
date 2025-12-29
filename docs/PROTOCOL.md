@@ -215,6 +215,7 @@ Challenge-response authentication was considered but rejected because:
 | 0x1B | ALLOW_UNENCRYPTED | Explicitly allow unencrypted DMs |
 | 0x1C | LOGOUT | Clear authentication, become anonymous |
 | 0x1D | UPDATE_READ_STATE | Update last read timestamp for a channel |
+| 0x1E | DECLINE_DM | Decline an incoming DM request |
 | 0x51 | SUBSCRIBE_THREAD | Subscribe to thread updates |
 | 0x52 | UNSUBSCRIBE_THREAD | Unsubscribe from thread updates |
 | 0x53 | SUBSCRIBE_CHANNEL | Subscribe to new threads in channel |
@@ -280,6 +281,8 @@ Challenge-response authentication was considered but rejected because:
 | 0xAB | CHANNEL_USER_LIST | Snapshot of users currently in a channel |
 | 0xAC | CHANNEL_PRESENCE | Channel join/leave notification |
 | 0xAD | SERVER_PRESENCE | Server-wide presence notification |
+| 0xAE | DM_PARTICIPANT_LEFT | A participant has permanently left a DM |
+| 0xAF | DM_DECLINED | Notification that a DM request was declined |
 
 ## Message Payloads
 
@@ -495,12 +498,18 @@ If `subchannel_id` is not present, join the channel at the root level (for chann
 ### 0x06 - LEAVE_CHANNEL (Client → Server)
 
 ```
-+-------------------+-----------------------------+
-| channel_id (u64)  | subchannel_id (Optional u64)|
-+-------------------+-----------------------------+
++-------------------+-----------------------------+-------------------+
+| channel_id (u64)  | subchannel_id (Optional u64)| permanent (bool)  |
++-------------------+-----------------------------+-------------------+
 ```
 
 Requests that the server remove the session from the given channel/subchannel. When `subchannel_id` is omitted the user leaves the root-level channel subscription.
+
+The `permanent` field controls whether the leave is temporary (navigation) or permanent (close/delete):
+- `permanent = false`: User is navigating away but may return. DM channels remain in sidebar.
+- `permanent = true`: User is permanently leaving. For DM channels, removes the user from the channel's participant list and the DM disappears from their sidebar.
+
+For backwards compatibility, if `permanent` is not present in the payload, it defaults to `false`.
 
 ### 0x85 - JOIN_RESPONSE (Server → Client)
 
@@ -1085,6 +1094,65 @@ Server-wide presence event for connection lifecycle changes.
 - `online = true` signals a new active session; `online = false` signals termination.
 - Enables clients to keep a global roster synchronized after an initial `USER_LIST` snapshot.
 - Servers MAY omit this message when no listeners have requested presence updates; clients must be resilient to its absence.
+
+### 0xAE - DM_PARTICIPANT_LEFT (Server → Client)
+
+Notification sent to remaining DM participants when someone permanently leaves a DM conversation.
+
+```
++---------------------+------------------------+----------------------+
+| dm_channel_id (u64) | user_id (Optional u64) | nickname (String)    |
++---------------------+------------------------+----------------------+
+```
+
+**Fields:**
+- `dm_channel_id`: The DM channel the participant left
+- `user_id`: The user ID of the participant who left (if registered), absent if anonymous
+- `nickname`: The display nickname of the participant who left
+
+**Notes:**
+- Sent only when a participant uses "permanent leave" (Ctrl+W in client), not for temporary channel switching
+- Allows remaining participants to know they are now talking to no one
+- Client should display a system message in the DM indicating the other participant has left
+- For anonymous users, `user_id` is absent since they have no persistent identity
+
+### 0x1E - DECLINE_DM (Client → Server)
+
+Decline an incoming DM request.
+
+```
++---------------------+
+| dm_channel_id (u64) |
++---------------------+
+```
+
+**Fields:**
+- `dm_channel_id`: The DM channel/invite ID being declined
+
+**Notes:**
+- Sent when user declines an incoming DM request (from DM_REQUEST modal)
+- Server will notify the initiator via DM_DECLINED message
+- Server will clean up the pending invite
+
+### 0xAF - DM_DECLINED (Server → Client)
+
+Notification sent to DM initiator when their request is declined.
+
+```
++---------------------+------------------------+----------------------+
+| dm_channel_id (u64) | user_id (Optional u64) | nickname (String)    |
++---------------------+------------------------+----------------------+
+```
+
+**Fields:**
+- `dm_channel_id`: The DM channel/invite ID that was declined
+- `user_id`: The user ID who declined (if registered), absent if anonymous
+- `nickname`: The display nickname of the user who declined
+
+**Notes:**
+- Sent to the DM initiator when the target declines their request
+- Client should remove the pending outgoing invite from the sidebar
+- May optionally show a notification that the request was declined
 
 ### 0x1C - LOGOUT (Client → Server)
 

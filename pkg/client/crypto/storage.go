@@ -69,6 +69,26 @@ func (ks *KeyStore) keyFilePath(serverHost string, userID uint64) (string, error
 	return filepath.Join(dir, filename), nil
 }
 
+// anonKeyFilePath returns the path to a key file for an anonymous user.
+// Format: {keysDir}/{serverHost}_anon_{nickname}.x25519
+func (ks *KeyStore) anonKeyFilePath(serverHost string, nickname string) (string, error) {
+	if nickname == "" {
+		return "", errors.New("nickname cannot be empty")
+	}
+
+	dir, err := ks.keysDir()
+	if err != nil {
+		return "", err
+	}
+
+	// Sanitize server host and nickname for use in filename
+	safeHost := sanitizeHostForFilename(serverHost)
+	safeNickname := sanitizeHostForFilename(nickname) // Reuse same sanitization
+	filename := fmt.Sprintf("%s_anon_%s%s", safeHost, safeNickname, KeyFileExtension)
+
+	return filepath.Join(dir, filename), nil
+}
+
 // sanitizeHostForFilename converts a server host to a safe filename component.
 // Replaces : with _ and removes any path separators.
 func sanitizeHostForFilename(host string) string {
@@ -149,6 +169,84 @@ func (ks *KeyStore) HasKey(serverHost string, userID uint64) bool {
 // DeleteKey removes a stored key for a user on a specific server.
 func (ks *KeyStore) DeleteKey(serverHost string, userID uint64) error {
 	path, err := ks.keyFilePath(serverHost, userID)
+	if err != nil {
+		return err
+	}
+
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to delete key file: %w", err)
+	}
+
+	return nil
+}
+
+// SaveAnonKey saves an X25519 private key for an anonymous user on a specific server.
+// The key is identified by the user's nickname.
+func (ks *KeyStore) SaveAnonKey(serverHost string, nickname string, privateKey []byte) error {
+	if len(privateKey) != X25519KeySize {
+		return fmt.Errorf("%w: expected %d bytes, got %d", ErrInvalidKeySize, X25519KeySize, len(privateKey))
+	}
+
+	path, err := ks.anonKeyFilePath(serverHost, nickname)
+	if err != nil {
+		return err
+	}
+
+	// Write atomically by writing to temp file first
+	tempPath := path + ".tmp"
+	if err := os.WriteFile(tempPath, privateKey, KeyFileMode); err != nil {
+		return fmt.Errorf("failed to write key file: %w", err)
+	}
+
+	// Rename to final path (atomic on POSIX)
+	if err := os.Rename(tempPath, path); err != nil {
+		os.Remove(tempPath) // Clean up temp file
+		return fmt.Errorf("failed to save key file: %w", err)
+	}
+
+	return nil
+}
+
+// LoadAnonKey loads an X25519 private key for an anonymous user on a specific server.
+func (ks *KeyStore) LoadAnonKey(serverHost string, nickname string) ([]byte, error) {
+	path, err := ks.anonKeyFilePath(serverHost, nickname)
+	if err != nil {
+		return nil, err
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, ErrKeyNotFound
+		}
+		return nil, fmt.Errorf("failed to read key file: %w", err)
+	}
+
+	if len(data) != X25519KeySize {
+		return nil, fmt.Errorf("%w: expected %d bytes, got %d", ErrKeyFileCorrupt, X25519KeySize, len(data))
+	}
+
+	return data, nil
+}
+
+// HasAnonKey checks if a key exists for an anonymous user on a specific server.
+func (ks *KeyStore) HasAnonKey(serverHost string, nickname string) bool {
+	path, err := ks.anonKeyFilePath(serverHost, nickname)
+	if err != nil {
+		return false
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+
+	return info.Size() == X25519KeySize
+}
+
+// DeleteAnonKey removes a stored key for an anonymous user on a specific server.
+func (ks *KeyStore) DeleteAnonKey(serverHost string, nickname string) error {
+	path, err := ks.anonKeyFilePath(serverHost, nickname)
 	if err != nil {
 		return err
 	}

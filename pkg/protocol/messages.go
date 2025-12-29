@@ -48,6 +48,7 @@ const (
 	TypeProvidePublicKey   = 0x1A // V3: Upload encryption key
 	TypeAllowUnencrypted   = 0x1B // V3: Allow unencrypted DM
 	TypeUpdateReadState    = 0x1D
+	TypeDeclineDM          = 0x1E // V3: Decline incoming DM request
 	TypeSubscribeThread    = 0x51
 	TypeUnsubscribeThread  = 0x52
 	TypeSubscribeChannel   = 0x53
@@ -106,9 +107,11 @@ const (
 	TypeDMPending   = 0xA3 // Waiting for other party
 	TypeDMRequest   = 0xA4 // Incoming DM request
 
-	TypeChannelUserList = 0xAB
-	TypeChannelPresence = 0xAC
-	TypeServerPresence  = 0xAD
+	TypeChannelUserList     = 0xAB
+	TypeChannelPresence     = 0xAC
+	TypeServerPresence      = 0xAD
+	TypeDMParticipantLeft   = 0xAE
+	TypeDMDeclined          = 0xAF
 
 	// Admin responses (Server → Client)
 	TypeUserBanned = 0x9F
@@ -673,13 +676,17 @@ func (m *JoinChannelMessage) Decode(payload []byte) error {
 type LeaveChannelMessage struct {
 	ChannelID    uint64
 	SubchannelID *uint64
+	Permanent    bool // If true, permanently leave (for DMs: remove from sidebar)
 }
 
 func (m *LeaveChannelMessage) EncodeTo(w io.Writer) error {
 	if err := WriteUint64(w, m.ChannelID); err != nil {
 		return err
 	}
-	return WriteOptionalUint64(w, m.SubchannelID)
+	if err := WriteOptionalUint64(w, m.SubchannelID); err != nil {
+		return err
+	}
+	return WriteBool(w, m.Permanent)
 }
 
 func (m *LeaveChannelMessage) Encode() ([]byte, error) {
@@ -700,9 +707,15 @@ func (m *LeaveChannelMessage) Decode(payload []byte) error {
 	if err != nil {
 		return err
 	}
+	// Permanent is optional for backwards compatibility
+	permanent, err := ReadBool(buf)
+	if err != nil {
+		permanent = false // Default to non-permanent
+	}
 
 	m.ChannelID = channelID
 	m.SubchannelID = subchannelID
+	m.Permanent = permanent
 	return nil
 }
 
@@ -2832,6 +2845,125 @@ func (m *ServerPresenceMessage) Decode(payload []byte) error {
 	m.UserID = userID
 	m.UserFlags = UserFlags(flags)
 	m.Online = online
+	return nil
+}
+
+// DMParticipantLeftMessage (0xAE) - Notification when someone permanently leaves a DM
+type DMParticipantLeftMessage struct {
+	DMChannelID uint64
+	UserID      *uint64 // Optional: user ID if registered user
+	Nickname    string
+}
+
+func (m *DMParticipantLeftMessage) EncodeTo(w io.Writer) error {
+	if err := WriteUint64(w, m.DMChannelID); err != nil {
+		return err
+	}
+	if err := WriteOptionalUint64(w, m.UserID); err != nil {
+		return err
+	}
+	return WriteString(w, m.Nickname)
+}
+
+func (m *DMParticipantLeftMessage) Encode() ([]byte, error) {
+	buf := new(bytes.Buffer)
+	if err := m.EncodeTo(buf); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func (m *DMParticipantLeftMessage) Decode(payload []byte) error {
+	buf := bytes.NewReader(payload)
+	dmChannelID, err := ReadUint64(buf)
+	if err != nil {
+		return err
+	}
+	userID, err := ReadOptionalUint64(buf)
+	if err != nil {
+		return err
+	}
+	nickname, err := ReadString(buf)
+	if err != nil {
+		return err
+	}
+
+	m.DMChannelID = dmChannelID
+	m.UserID = userID
+	m.Nickname = nickname
+	return nil
+}
+
+// DeclineDMMessage (0x1E) - Decline an incoming DM request
+type DeclineDMMessage struct {
+	DMChannelID uint64
+}
+
+func (m *DeclineDMMessage) EncodeTo(w io.Writer) error {
+	return WriteUint64(w, m.DMChannelID)
+}
+
+func (m *DeclineDMMessage) Encode() ([]byte, error) {
+	buf := new(bytes.Buffer)
+	if err := m.EncodeTo(buf); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func (m *DeclineDMMessage) Decode(payload []byte) error {
+	buf := bytes.NewReader(payload)
+	dmChannelID, err := ReadUint64(buf)
+	if err != nil {
+		return err
+	}
+	m.DMChannelID = dmChannelID
+	return nil
+}
+
+// DMDeclinedMessage (0xAF) - Notification that a DM request was declined
+type DMDeclinedMessage struct {
+	DMChannelID uint64
+	UserID      *uint64 // Optional: user ID if registered user
+	Nickname    string
+}
+
+func (m *DMDeclinedMessage) EncodeTo(w io.Writer) error {
+	if err := WriteUint64(w, m.DMChannelID); err != nil {
+		return err
+	}
+	if err := WriteOptionalUint64(w, m.UserID); err != nil {
+		return err
+	}
+	return WriteString(w, m.Nickname)
+}
+
+func (m *DMDeclinedMessage) Encode() ([]byte, error) {
+	buf := new(bytes.Buffer)
+	if err := m.EncodeTo(buf); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func (m *DMDeclinedMessage) Decode(payload []byte) error {
+	buf := bytes.NewReader(payload)
+	dmChannelID, err := ReadUint64(buf)
+	if err != nil {
+		return err
+	}
+	userID, err := ReadOptionalUint64(buf)
+	if err != nil {
+		return err
+	}
+	nickname, err := ReadString(buf)
+	if err != nil {
+		return err
+	}
+
+	m.DMChannelID = dmChannelID
+	m.UserID = userID
+	m.Nickname = nickname
 	return nil
 }
 

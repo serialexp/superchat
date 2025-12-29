@@ -32,6 +32,9 @@ func (m *MockStateForHelpers) SaveSuccessfulConnection(serverAddress string, met
 func (m *MockStateForHelpers) GetStateDir() string { return "" }
 func (m *MockStateForHelpers) GetFirstPostWarningDismissed() bool { return false }
 func (m *MockStateForHelpers) SetFirstPostWarningDismissed() error { return nil }
+func (m *MockStateForHelpers) GetLastSeenTimestamp() int64 { return 0 }
+func (m *MockStateForHelpers) SetLastSeenTimestamp(timestamp int64) error { return nil }
+func (m *MockStateForHelpers) UpdateLastSeenTimestamp() error { return nil }
 func (m *MockStateForHelpers) Close() error { return nil }
 
 func TestResolveConnectionMethod(t *testing.T) {

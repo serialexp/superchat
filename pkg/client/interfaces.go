@@ -68,6 +68,11 @@ type StateInterface interface {
 	GetLastSuccessfulMethod(serverAddress string) (string, error)
 	SaveSuccessfulConnection(serverAddress string, method string) error
 
+	// Last seen timestamp (for anonymous user unread counts)
+	GetLastSeenTimestamp() int64
+	SetLastSeenTimestamp(timestamp int64) error
+	UpdateLastSeenTimestamp() error
+
 	// State directory
 	GetStateDir() string
 

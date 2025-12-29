@@ -488,6 +488,11 @@ func (s *Server) handleListChannels(sess *Session, frame *protocol.Frame) error 
 	// Apply pagination
 	channelList := make([]protocol.Channel, 0, len(dbChannels))
 	for _, dbCh := range dbChannels {
+		// Skip DM channels - they're handled separately
+		if dbCh.IsDM {
+			continue
+		}
+
 		// Skip channels before cursor
 		if msg.FromChannelID > 0 && uint64(dbCh.ID) <= msg.FromChannelID {
 			continue
@@ -535,9 +540,9 @@ func (s *Server) handleJoinChannel(sess *Session, frame *protocol.Frame) error {
 		return s.sendError(sess, 1000, "Invalid message format")
 	}
 
-	// Check if channel exists in MemDB (instant lookup)
-	exists, err := s.db.ChannelExists(int64(msg.ChannelID))
-	if err != nil || !exists {
+	// Check if channel exists
+	channel, err := s.db.GetChannel(int64(msg.ChannelID))
+	if err != nil || channel == nil {
 		errorLog.Printf("Session %d: Channel %d not found", sess.ID, msg.ChannelID)
 		resp := &protocol.JoinResponseMessage{
 			Success:      false,
@@ -546,6 +551,26 @@ func (s *Server) handleJoinChannel(sess *Session, frame *protocol.Frame) error {
 			Message:      "Channel not found",
 		}
 		return s.sendMessage(sess, protocol.TypeJoinResponse, resp)
+	}
+
+	// For DM channels, check that the user is a participant
+	if channel.IsDM {
+		sess.mu.RLock()
+		userID := sess.UserID
+		sessionID := sess.DBSessionID
+		sess.mu.RUnlock()
+
+		isParticipant, err := s.db.IsChannelParticipant(channel.ID, userID, sessionID)
+		if err != nil || !isParticipant {
+			log.Printf("[DM] Session %d tried to join DM channel %d but is not a participant", sess.ID, channel.ID)
+			resp := &protocol.JoinResponseMessage{
+				Success:      false,
+				ChannelID:    msg.ChannelID,
+				SubchannelID: nil,
+				Message:      "Not a participant in this DM",
+			}
+			return s.sendMessage(sess, protocol.TypeJoinResponse, resp)
+		}
 	}
 
 	sess.mu.RLock()
@@ -610,6 +635,69 @@ func (s *Server) handleLeaveChannel(sess *Session, frame *protocol.Frame) error 
 
 	if err := s.sessions.SetJoinedChannel(sess.ID, nil); err != nil {
 		return s.sendError(sess, 9000, "Failed to leave channel")
+	}
+
+	// For DM channels with permanent=true, remove the participant and notify others
+	if msg.Permanent {
+		channel, err := s.db.GetChannel(targetChannelID)
+		if err == nil && channel != nil && channel.IsDM {
+			sess.mu.RLock()
+			userID := sess.UserID
+			sessionID := sess.DBSessionID
+			nickname := sess.Nickname
+			sess.mu.RUnlock()
+
+			// Get other participants BEFORE removing the current one
+			participants, _ := s.db.GetChannelParticipants(targetChannelID)
+
+			// Remove participant based on user ID (registered) or session ID (anonymous)
+			if userID != nil {
+				s.db.RemoveParticipantByUserID(targetChannelID, *userID)
+				log.Printf("[DM] Permanently removed registered user %d from DM channel %d", *userID, targetChannelID)
+			} else {
+				s.db.RemoveParticipantBySessionID(targetChannelID, sessionID)
+				log.Printf("[DM] Permanently removed anonymous session %d from DM channel %d", sessionID, targetChannelID)
+			}
+
+			// Create a system message so it persists in history
+			systemContent := fmt.Sprintf("%s has left the conversation", nickname)
+			s.db.CreateSystemMessage(targetChannelID, systemContent)
+
+			// Notify other participants that this user has left (real-time)
+			leftMsg := &protocol.DMParticipantLeftMessage{
+				DMChannelID: uint64(targetChannelID),
+				UserID:      toUint64Ptr(userID),
+				Nickname:    nickname,
+			}
+			for _, p := range participants {
+				// Skip the leaving user
+				if userID != nil && p.UserID != nil && *p.UserID == *userID {
+					continue
+				}
+				if userID == nil && p.SessionID != nil && *p.SessionID == sessionID {
+					continue
+				}
+
+				// Send to participant by user ID (registered) or session ID (anonymous)
+				if p.UserID != nil {
+					s.sendToUser(*p.UserID, protocol.TypeDMParticipantLeft, leftMsg)
+				} else if p.SessionID != nil {
+					if otherSess, ok := s.sessions.GetSessionByDBID(*p.SessionID); ok {
+						s.sendMessage(otherSess, protocol.TypeDMParticipantLeft, leftMsg)
+					}
+				}
+			}
+
+			// If no participants remain, delete the DM channel entirely
+			remainingParticipants, _ := s.db.GetChannelParticipants(targetChannelID)
+			if len(remainingParticipants) == 0 {
+				if err := s.db.DeleteChannel(uint64(targetChannelID)); err != nil {
+					log.Printf("[DM] Failed to delete empty DM channel %d: %v", targetChannelID, err)
+				} else {
+					log.Printf("[DM] Deleted empty DM channel %d", targetChannelID)
+				}
+			}
+		}
 	}
 
 	resp := &protocol.LeaveResponseMessage{
@@ -991,10 +1079,24 @@ func (s *Server) handlePostMessage(sess *Session, frame *protocol.Frame) error {
 		parentID = &id
 	}
 
-	// Chat channels (type 0) don't support threading
+	// Get channel and check access
 	channel, err := s.db.GetChannel(int64(msg.ChannelID))
 	if err != nil {
 		return s.dbError(sess, "GetChannel", err)
+	}
+
+	// For DM channels, verify sender is a participant
+	if channel.IsDM {
+		sess.mu.RLock()
+		userID := sess.UserID
+		sessionID := sess.DBSessionID
+		sess.mu.RUnlock()
+
+		isParticipant, err := s.db.IsChannelParticipant(channel.ID, userID, sessionID)
+		if err != nil || !isParticipant {
+			log.Printf("[DM] Session %d tried to post to DM channel %d but is not a participant", sess.ID, channel.ID)
+			return s.sendError(sess, protocol.ErrCodePermissionDenied, "Not a participant in this DM")
+		}
 	}
 
 	if channel.ChannelType == 0 && parentID != nil {
@@ -1871,8 +1973,8 @@ func convertDBMessageToProtocol(dbMsg *database.Message, db *database.MemDB) *pr
 			// Fallback if user lookup fails (shouldn't happen)
 			nickname = "<user:" + fmt.Sprint(*dbMsg.AuthorUserID) + ">"
 		}
-	} else {
-		// Anonymous user - prefix with tilde
+	} else if dbMsg.AuthorNickname != "" {
+		// Anonymous user - prefix with tilde (but not for system messages with empty author)
 		nickname = "~" + dbMsg.AuthorNickname
 	}
 
@@ -3359,18 +3461,20 @@ func (s *Server) handleStartDM(sess *Session, frame *protocol.Frame) error {
 
 	// Create DM invite (for unencrypted or key setup flow)
 	isEncrypted := canEncrypt
-	var inviteID int64
-	if initiatorUserID != nil && targetUserID != nil {
-		inviteID, err = s.db.CreateDMInvite(*initiatorUserID, *targetUserID, isEncrypted)
-		if err != nil {
-			log.Printf("[ERROR] Failed to create DM invite: %v", err)
-			return s.sendError(sess, protocol.ErrCodeDatabaseError, "Failed to create DM invite")
-		}
+	var targetSessID int64
+	if targetSession != nil {
+		targetSessID = targetSession.DBSessionID
 	}
+	dbInviteID, err := s.db.CreateDMInviteWithSessions(initiatorUserID, targetUserID, sess.DBSessionID, targetSessID, isEncrypted)
+	if err != nil {
+		log.Printf("[ERROR] Failed to create DM invite: %v", err)
+		return s.sendError(sess, protocol.ErrCodeDatabaseError, "Failed to create DM invite")
+	}
+	inviteID := uint64(dbInviteID)
 
 	// Send DM_PENDING to initiator
 	pending := &protocol.DMPendingMessage{
-		DMChannelID:        uint64(inviteID),
+		DMChannelID:        inviteID,
 		WaitingForUserID:   toUint64Ptr(targetUserID),
 		WaitingForNickname: targetNickname,
 		Reason:             "Waiting for " + targetNickname + " to accept",
@@ -3394,7 +3498,7 @@ func (s *Server) handleStartDM(sess *Session, frame *protocol.Frame) error {
 	}
 
 	request := &protocol.DMRequestMessage{
-		DMChannelID:      uint64(inviteID),
+		DMChannelID:      inviteID,
 		FromUserID:       toUint64Ptr(initiatorUserID),
 		FromNickname:     initiatorNickname,
 		EncryptionStatus: encryptionStatus,
@@ -3457,48 +3561,85 @@ func (s *Server) handleAllowUnencrypted(sess *Session, frame *protocol.Frame) er
 		return s.sendError(sess, protocol.ErrCodeInvalidFormat, "Invalid ALLOW_UNENCRYPTED format")
 	}
 
-	// Get the invite
+	// Get the invite from database
 	invite, err := s.db.GetDMInvite(int64(msg.DMChannelID))
 	if err != nil || invite == nil {
 		return s.sendError(sess, protocol.ErrCodeNotFound, "DM invite not found")
 	}
 
+	// Verify this session is the target of the invite
 	sess.mu.RLock()
 	userID := sess.UserID
 	sess.mu.RUnlock()
 
-	// Verify this user is the target of the invite
-	if userID == nil || *userID != invite.TargetUserID {
+	isAuthorized := false
+	if invite.TargetSessionID != nil && *invite.TargetSessionID == sess.DBSessionID {
+		// Session-based authorization (for anonymous users)
+		isAuthorized = true
+	} else if invite.TargetUserID != nil && userID != nil && *userID == *invite.TargetUserID {
+		// User-based authorization (for registered users)
+		isAuthorized = true
+	}
+	if !isAuthorized {
 		return s.sendError(sess, protocol.ErrCodePermissionDenied, "Not authorized for this invite")
 	}
 
-	// Create unencrypted DM channel
-	channelID, err := s.db.CreateDMChannel(invite.InitiatorUserID, invite.TargetUserID, false)
+	// Get nicknames from sessions
+	var initiatorNickname, targetNickname string
+	if invite.InitiatorSessionID != nil {
+		if initSess, ok := s.sessions.GetSessionByDBID(*invite.InitiatorSessionID); ok {
+			initSess.mu.RLock()
+			initiatorNickname = initSess.Nickname
+			initSess.mu.RUnlock()
+		}
+	}
+	if invite.TargetSessionID != nil {
+		if targetSess, ok := s.sessions.GetSessionByDBID(*invite.TargetSessionID); ok {
+			targetSess.mu.RLock()
+			targetNickname = targetSess.Nickname
+			targetSess.mu.RUnlock()
+		}
+	}
+
+	// For registered users, also try to get nickname from User table
+	if initiatorNickname == "" && invite.InitiatorUserID != nil {
+		if user, _ := s.db.GetUserByID(*invite.InitiatorUserID); user != nil {
+			initiatorNickname = user.Nickname
+		}
+	}
+	if targetNickname == "" && invite.TargetUserID != nil {
+		if user, _ := s.db.GetUserByID(*invite.TargetUserID); user != nil {
+			targetNickname = user.Nickname
+		}
+	}
+
+	// Create a real DM channel with participants (works for both registered and anonymous users)
+	var initSessionID int64
+	if invite.InitiatorSessionID != nil {
+		initSessionID = *invite.InitiatorSessionID
+	}
+	targetSessionID := sess.DBSessionID
+
+	channelID, err := s.db.CreateDMChannelWithParticipants(
+		invite.InitiatorUserID, initSessionID, initiatorNickname,
+		invite.TargetUserID, targetSessionID, targetNickname,
+	)
 	if err != nil {
-		log.Printf("[ERROR] Failed to create unencrypted DM: %v", err)
+		log.Printf("[ERROR] Failed to create DM channel: %v", err)
 		return s.sendError(sess, protocol.ErrCodeDatabaseError, "Failed to create DM")
 	}
 
 	// Delete the invite
 	s.db.DeleteDMInvite(invite.ID)
 
-	// Get user info
-	initiatorUser, _ := s.db.GetUserByID(invite.InitiatorUserID)
-	targetUser, _ := s.db.GetUserByID(invite.TargetUserID)
-
-	initiatorNickname := ""
-	targetNickname := ""
-	if initiatorUser != nil {
-		initiatorNickname = initiatorUser.Nickname
-	}
-	if targetUser != nil {
-		targetNickname = targetUser.Nickname
-	}
-
 	// Send DM_READY to target (this user)
+	var initiatorUserIDPtr *uint64
+	if invite.InitiatorUserID != nil {
+		initiatorUserIDPtr = toUint64Ptr(invite.InitiatorUserID)
+	}
 	targetReady := &protocol.DMReadyMessage{
 		ChannelID:     uint64(channelID),
-		OtherUserID:   toUint64Ptr(&invite.InitiatorUserID),
+		OtherUserID:   initiatorUserIDPtr,
 		OtherNickname: initiatorNickname,
 		IsEncrypted:   false,
 	}
@@ -3507,14 +3648,79 @@ func (s *Server) handleAllowUnencrypted(sess *Session, frame *protocol.Frame) er
 	}
 
 	// Send DM_READY to initiator
+	var targetUserIDPtr *uint64
+	if invite.TargetUserID != nil {
+		targetUserIDPtr = toUint64Ptr(invite.TargetUserID)
+	}
 	initiatorReady := &protocol.DMReadyMessage{
 		ChannelID:     uint64(channelID),
-		OtherUserID:   toUint64Ptr(&invite.TargetUserID),
+		OtherUserID:   targetUserIDPtr,
 		OtherNickname: targetNickname,
 		IsEncrypted:   false,
 	}
-	s.sendToUser(invite.InitiatorUserID, protocol.TypeDMReady, initiatorReady)
 
+	// Send to initiator - try by user ID first, then by session ID
+	if invite.InitiatorUserID != nil {
+		s.sendToUser(*invite.InitiatorUserID, protocol.TypeDMReady, initiatorReady)
+	} else if invite.InitiatorSessionID != nil {
+		if initSess, ok := s.sessions.GetSessionByDBID(*invite.InitiatorSessionID); ok {
+			s.sendMessage(initSess, protocol.TypeDMReady, initiatorReady)
+		}
+	}
+
+	return nil
+}
+
+// handleDeclineDM handles DECLINE_DM message - when target declines an incoming DM request
+func (s *Server) handleDeclineDM(sess *Session, frame *protocol.Frame) error {
+	msg := &protocol.DeclineDMMessage{}
+	if err := msg.Decode(frame.Payload); err != nil {
+		return s.sendError(sess, protocol.ErrCodeInvalidFormat, "Invalid DECLINE_DM format")
+	}
+
+	// Get the invite from database
+	invite, err := s.db.GetDMInvite(int64(msg.DMChannelID))
+	if err != nil || invite == nil {
+		// Invite might already be deleted, just return success
+		return nil
+	}
+
+	// Verify this session is the target of the invite
+	sess.mu.RLock()
+	userID := sess.UserID
+	nickname := sess.Nickname
+	sess.mu.RUnlock()
+
+	isAuthorized := false
+	if invite.TargetSessionID != nil && *invite.TargetSessionID == sess.DBSessionID {
+		isAuthorized = true
+	} else if invite.TargetUserID != nil && userID != nil && *userID == *invite.TargetUserID {
+		isAuthorized = true
+	}
+	if !isAuthorized {
+		return s.sendError(sess, protocol.ErrCodePermissionDenied, "Not authorized for this invite")
+	}
+
+	// Delete the invite
+	s.db.DeleteDMInvite(invite.ID)
+
+	// Notify the initiator that their DM request was declined
+	declinedMsg := &protocol.DMDeclinedMessage{
+		DMChannelID: msg.DMChannelID,
+		UserID:      toUint64Ptr(userID),
+		Nickname:    nickname,
+	}
+
+	// Send to initiator - try by user ID first, then by session ID
+	if invite.InitiatorUserID != nil {
+		s.sendToUser(*invite.InitiatorUserID, protocol.TypeDMDeclined, declinedMsg)
+	} else if invite.InitiatorSessionID != nil {
+		if initSess, ok := s.sessions.GetSessionByDBID(*invite.InitiatorSessionID); ok {
+			s.sendMessage(initSess, protocol.TypeDMDeclined, declinedMsg)
+		}
+	}
+
+	log.Printf("[DM] User %s declined DM invite %d", nickname, invite.ID)
 	return nil
 }
 
@@ -3599,13 +3805,18 @@ func toUint64Ptr(i *int64) *uint64 {
 
 // Helper: process pending invite after user provides key
 func (s *Server) processPendingInviteAfterKey(sess *Session, invite *database.DMInvite) {
+	// Encrypted DMs only apply to registered users
+	if invite.InitiatorUserID == nil || invite.TargetUserID == nil {
+		return
+	}
+
 	// Check if initiator also has a key now
-	initiatorKey, _ := s.db.GetUserEncryptionKey(invite.InitiatorUserID)
-	targetKey, _ := s.db.GetUserEncryptionKey(invite.TargetUserID)
+	initiatorKey, _ := s.db.GetUserEncryptionKey(*invite.InitiatorUserID)
+	targetKey, _ := s.db.GetUserEncryptionKey(*invite.TargetUserID)
 
 	if len(initiatorKey) == 32 && len(targetKey) == 32 {
 		// Both have keys, create encrypted DM
-		channelID, err := s.db.CreateDMChannel(invite.InitiatorUserID, invite.TargetUserID, true)
+		channelID, err := s.db.CreateDMChannel(*invite.InitiatorUserID, *invite.TargetUserID, true)
 		if err != nil {
 			log.Printf("[ERROR] Failed to create DM after key setup: %v", err)
 			return
@@ -3615,8 +3826,8 @@ func (s *Server) processPendingInviteAfterKey(sess *Session, invite *database.DM
 		s.db.DeleteDMInvite(invite.ID)
 
 		// Get user info
-		initiatorUser, _ := s.db.GetUserByID(invite.InitiatorUserID)
-		targetUser, _ := s.db.GetUserByID(invite.TargetUserID)
+		initiatorUser, _ := s.db.GetUserByID(*invite.InitiatorUserID)
+		targetUser, _ := s.db.GetUserByID(*invite.TargetUserID)
 
 		// Send DM_READY to both
 		var initiatorPubKey, targetPubKey [32]byte
@@ -3626,7 +3837,7 @@ func (s *Server) processPendingInviteAfterKey(sess *Session, invite *database.DM
 		if targetUser != nil {
 			targetReady := &protocol.DMReadyMessage{
 				ChannelID:      uint64(channelID),
-				OtherUserID:    toUint64Ptr(&invite.InitiatorUserID),
+				OtherUserID:    toUint64Ptr(invite.InitiatorUserID),
 				OtherNickname:  initiatorUser.Nickname,
 				IsEncrypted:    true,
 				OtherPublicKey: initiatorPubKey,
@@ -3637,12 +3848,74 @@ func (s *Server) processPendingInviteAfterKey(sess *Session, invite *database.DM
 		if initiatorUser != nil {
 			initiatorReady := &protocol.DMReadyMessage{
 				ChannelID:      uint64(channelID),
-				OtherUserID:    toUint64Ptr(&invite.TargetUserID),
+				OtherUserID:    toUint64Ptr(invite.TargetUserID),
 				OtherNickname:  targetUser.Nickname,
 				IsEncrypted:    true,
 				OtherPublicKey: targetPubKey,
 			}
-			s.sendToUser(invite.InitiatorUserID, protocol.TypeDMReady, initiatorReady)
+			s.sendToUser(*invite.InitiatorUserID, protocol.TypeDMReady, initiatorReady)
+		}
+	}
+}
+
+// notifyDMParticipantsOfDisconnect notifies DM participants when a user disconnects
+func (s *Server) notifyDMParticipantsOfDisconnect(userID *int64, sessionID int64, nickname string) {
+	// Find all DM channels this user/session is a participant in
+	dmChannels, err := s.db.GetDMChannelsForParticipant(userID, sessionID)
+	if err != nil {
+		log.Printf("[DM] Failed to get DM channels for disconnecting user: %v", err)
+		return
+	}
+
+	for _, channelID := range dmChannels {
+		// Get other participants
+		participants, err := s.db.GetChannelParticipants(channelID)
+		if err != nil {
+			continue
+		}
+
+		// For anonymous users, remove them from the channel
+		if userID == nil {
+			s.db.RemoveParticipantBySessionID(channelID, sessionID)
+		}
+
+		// Create a system message so it persists in history
+		systemContent := fmt.Sprintf("%s has left the conversation", nickname)
+		s.db.CreateSystemMessage(channelID, systemContent)
+
+		// Notify other participants (real-time)
+		leftMsg := &protocol.DMParticipantLeftMessage{
+			DMChannelID: uint64(channelID),
+			UserID:      toUint64Ptr(userID),
+			Nickname:    nickname,
+		}
+
+		for _, p := range participants {
+			// Skip the disconnecting user
+			if userID != nil && p.UserID != nil && *p.UserID == *userID {
+				continue
+			}
+			if userID == nil && p.SessionID != nil && *p.SessionID == sessionID {
+				continue
+			}
+
+			// Send notification
+			if p.UserID != nil {
+				s.sendToUser(*p.UserID, protocol.TypeDMParticipantLeft, leftMsg)
+			} else if p.SessionID != nil {
+				if sess, ok := s.sessions.GetSessionByDBID(*p.SessionID); ok {
+					s.sendMessage(sess, protocol.TypeDMParticipantLeft, leftMsg)
+				}
+			}
+		}
+
+		// Check if channel is now empty (for anonymous users)
+		if userID == nil {
+			remaining, _ := s.db.GetChannelParticipants(channelID)
+			if len(remaining) == 0 {
+				s.db.DeleteChannel(uint64(channelID))
+				log.Printf("[DM] Deleted empty DM channel %d after disconnect", channelID)
+			}
 		}
 	}
 }
