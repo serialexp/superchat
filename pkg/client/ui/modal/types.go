@@ -38,6 +38,7 @@ const (
 	ModalDMRequest
 	ModalEncryptionSetup
 	ModalStartDM
+	ModalError
 )
 
 // String returns the string representation of the modal type
@@ -103,6 +104,8 @@ func (m ModalType) String() string {
 		return "EncryptionSetup"
 	case ModalStartDM:
 		return "StartDM"
+	case ModalError:
+		return "Error"
 	default:
 		return "Unknown"
 	}
