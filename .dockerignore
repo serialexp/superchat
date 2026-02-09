@@ -20,9 +20,9 @@ coverage.html
 .git/
 .gitignore
 
-# Documentation
+# Documentation (keep docs/ - needed by website docker build)
 *.md
-docs/
+!docs/**/*.md
 
 # Config examples
 *.example.toml
