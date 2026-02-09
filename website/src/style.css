@@ -181,6 +181,18 @@ h4 {
     color: var(--accent);
 }
 
+.version-badge {
+    display: inline-block;
+    margin-left: 10px;
+    padding: 2px 10px;
+    font-size: 0.6em;
+    font-weight: 500;
+    color: var(--accent);
+    border: 1px solid var(--accent);
+    border-radius: 12px;
+    vertical-align: middle;
+}
+
 .download-links {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));

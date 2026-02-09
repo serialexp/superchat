@@ -78,6 +78,18 @@ async function populateDownloads() {
         return;
     }
 
+    // Show version number in the download section heading
+    const versionTag = release.tag_name || release.name;
+    if (versionTag) {
+        const heading = document.querySelector('#download h3');
+        if (heading) {
+            const badge = document.createElement('span');
+            badge.className = 'version-badge';
+            badge.textContent = versionTag;
+            heading.appendChild(badge);
+        }
+    }
+
     const cards = [];
 
     for (const platform of PLATFORMS) {

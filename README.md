@@ -2,6 +2,10 @@
 
 Terminal-based threaded chat application with a custom binary protocol.
 
+| Channel List | Thread View | Chat View |
+|:---:|:---:|:---:|
+| ![Channel List](website/public/superchat.png) | ![Thread View](website/public/thread-view.png) | ![Chat View](website/public/chat-view.png) |
+
 ## Features
 
 - **Terminal UI** - Beautiful keyboard-driven interface built with Bubble Tea
