@@ -1,32 +1,24 @@
-# Build stage
-FROM node:20-alpine AS builder
-
-WORKDIR /app
-
-# Copy package files
-COPY website/package*.json ./
-
-# Install dependencies
+# Stage 1: Build SolidJS web client
+FROM node:20-alpine AS webclient-builder
+WORKDIR /webclient
+COPY web-client/package*.json web-client/bun.lock ./
 RUN npm ci
+COPY web-client/ ./
+RUN VITE_BASE_PATH=/app/ npm run build
 
-# Copy source files
+# Stage 2: Build website
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY website/package*.json ./
+RUN npm ci
 COPY website/ ./
-
-# Copy docs used during static site generation
 COPY docs /docs
-
-# Build the site
+COPY --from=webclient-builder /webclient/dist ./public/app/
 RUN npm run build
 
-# Production stage
+# Stage 3: Production
 FROM nginx:alpine
-
-# Copy built files from builder
 COPY --from=builder /app/dist /usr/share/nginx/html
-
-# Copy custom nginx config
 COPY website/nginx.conf /etc/nginx/conf.d/default.conf
-
 EXPOSE 80
-
 CMD ["nginx", "-g", "daemon off;"]

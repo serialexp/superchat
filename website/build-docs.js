@@ -90,7 +90,7 @@ const template = (title, content, relativePath) => `<!DOCTYPE html>
 
     <footer>
         <div class="container">
-            <p>&copy; 2025 SuperChat. Built with Go and Bubble Tea.</p>
+            <p>&copy; 2026 SuperChat. Built with Go and Bubble Tea.</p>
         </div>
     </footer>
 </body>

@@ -6,6 +6,7 @@
     "dev": "vite",
     "build": "npm run build:docs && vite build",
     "build:docs": "node build-docs.js",
+    "build:webclient": "cd ../web-client && VITE_BASE_PATH=/app/ npm run build && mkdir -p ../website/public/app && cp -r dist/* ../website/public/app/",
     "preview": "vite preview"
   },
   "keywords": [],

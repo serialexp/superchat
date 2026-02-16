@@ -1,0 +1,17 @@
+{
+  "name": "superchat-web-client",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Web client for SuperChat using binschema-generated TypeScript codec",
+  "scripts": {
+    "build": "esbuild src/main.ts --bundle --outfile=dist/main.js --sourcemap && cp index.html dist/",
+    "build:codec": "esbuild src/SuperChatCodec.ts --outfile=dist/SuperChatCodec.js --format=esm && esbuild src/BitStream.ts --outfile=dist/BitStream.js --format=esm",
+    "test": "npm run build:codec && node test-client.js",
+    "dev": "esbuild src/main.ts --bundle --outfile=dist/main.js --sourcemap --watch",
+    "serve": "python3 -m http.server 3000"
+  },
+  "devDependencies": {
+    "esbuild": "^0.19.0",
+    "typescript": "^5.0.0"
+  }
+}

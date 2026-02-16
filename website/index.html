@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SuperChat - Threaded Chat for Terminal and Desktop</title>
+    <title>SuperChat - Threaded Chat for Terminal, Desktop, and Browser</title>
     <link rel="icon" type="image/png" href="/favicon.png">
     <link rel="stylesheet" href="/src/style.css">
 </head>
@@ -14,14 +14,14 @@
                 <img src="/mascot.png" alt="SuperChat mascot" class="mascot">
                 <h1>SuperChat</h1>
             </div>
-            <p class="tagline">Threaded chat for the terminal and desktop</p>
+            <p class="tagline">Threaded chat for the terminal, desktop, and browser</p>
         </div>
     </header>
 
     <main class="container">
         <section class="hero">
-            <h2>Anonymous, threaded discussions in your terminal</h2>
-            <p>SuperChat brings forum-style threaded conversations to the command line. No registration required, just download and connect.</p>
+            <h2>Threaded discussions in your terminal and browser</h2>
+            <p>SuperChat brings forum-style threaded conversations to the command line and beyond. Connect anonymously or register an account - just download and go.</p>
             <div class="cta-buttons">
                 <a href="/app/index.html" class="cta-button primary">Try in Browser</a>
                 <a href="#download" class="cta-button secondary">Download Client</a>
@@ -41,13 +41,20 @@
             <h3>Features</h3>
             <ul>
                 <li><strong>Terminal UI</strong> - Beautiful keyboard-driven interface built with Bubble Tea</li>
-                <li><strong>Web Client</strong> - Try SuperChat directly in your browser with WebSocket support (currently anonymous access only)</li>
+                <li><strong>Desktop Client</strong> - Native desktop app built with Wails and SolidJS</li>
+                <li><strong>Web Client</strong> - Try SuperChat directly in your browser with WebSocket support</li>
                 <li><strong>Flexible Channel Types</strong> - Forum-style threaded discussions with nested replies, or linear chat channels for quick conversations</li>
-                <li><strong>Anonymous by Default</strong> - No registration needed, pick a nickname and start chatting. We're aware that anonymity relies on a gentleman's agreement not to spam - server operators can ban misbehaving users or IPs to keep things civil</li>
+                <li><strong>Subchannels</strong> - Two-level channel hierarchy for organizing discussions within a channel</li>
+                <li><strong>Direct Messages</strong> - Private conversations between users with optional end-to-end encryption</li>
+                <li><strong>End-to-End Encryption</strong> - X25519 key exchange for encrypted DMs, with per-conversation encryption preferences</li>
+                <li><strong>Anonymous or Registered</strong> - No registration needed to start chatting, but register for persistent identity and SSH key authentication</li>
+                <li><strong>User-Created Channels</strong> - Registered users can create and manage their own channels and subchannels</li>
+                <li><strong>Message Editing</strong> - Edit your messages after posting, with full version history</li>
                 <li><strong>Real-time Updates</strong> - See new messages as they arrive</li>
                 <li><strong>Vim-like Navigation</strong> - j/k to navigate, Enter to select, Esc to go back, / or : for command mode</li>
-                <li><strong>Multiple Connection Types</strong> - Connect over plain TCP using SuperChat's custom binary protocol (documentation coming soon), SSH (same protocol over SSH connection), or WebSocket (same protocol over HTTP/HTTPS)</li>
-                <li><strong>Decentralized Server Discovery</strong> - Servers automatically advertise themselves to each other, using superchat.win as a bootstrap node. Once aware of each other, the network becomes self-propagating</li>
+                <li><strong>Multiple Connection Types</strong> - Connect over plain TCP, SSH (with auto-registration), or WebSocket (HTTP/HTTPS)</li>
+                <li><strong>Message Compression</strong> - LZ4 compression for efficient bandwidth usage, transparent and automatic</li>
+                <li><strong>Decentralized Server Discovery</strong> - Servers automatically advertise themselves to each other, using superchat.win as a bootstrap node</li>
             </ul>
         </section>
 
@@ -86,7 +93,7 @@ scd --port 6465</code></pre>
 
         <section class="documentation">
             <h3>Documentation</h3>
-            <p>Documentation coming soon. Check back later for deployment guides, configuration reference, and security best practices.</p>
+            <p>Read the <a href="/docs/index.html">full documentation</a> for deployment guides, protocol specification, configuration reference, and security best practices.</p>
         </section>
 
         <section class="github">
@@ -97,7 +104,7 @@ scd --port 6465</code></pre>
 
     <footer>
         <div class="container">
-            <p>&copy; 2025 SuperChat. Built with Go and Bubble Tea.</p>
+            <p>&copy; 2026 SuperChat. Built with Go and Bubble Tea.</p>
         </div>
     </footer>
 
