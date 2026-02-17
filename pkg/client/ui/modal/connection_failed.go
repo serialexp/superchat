@@ -83,8 +83,12 @@ func (m *ConnectionFailedModal) HandleKey(msg tea.KeyMsg) (bool, Modal, tea.Cmd)
 			return ConnectionFailedSwitchServerMsg{}
 		}
 
-	case "q", "esc":
-		// Quit (shortcut)
+	case "esc":
+		// Dismiss modal and keep browsing cached data
+		return true, nil, nil
+
+	case "q":
+		// Quit application
 		return true, nil, tea.Quit
 
 	case "enter":
@@ -195,7 +199,7 @@ func (m *ConnectionFailedModal) Render(width, height int) string {
 
 	// Navigation hint
 	content += "\n"
-	content += keyHintStyle.Render("[↑/↓] Navigate  [Enter] Select  [Esc] Quit")
+	content += keyHintStyle.Render("[↑/↓] Navigate  [Enter] Select  [Esc] Dismiss  [Q] Quit")
 
 	// Create border style
 	borderStyle := lipgloss.NewStyle().
@@ -222,7 +226,8 @@ func (m *ConnectionFailedModal) Render(width, height int) string {
 	)
 }
 
-// IsBlockingInput returns whether this modal blocks input to the main view
+// IsBlockingInput returns whether this modal blocks input to the main view.
+// Returns false so users can browse cached data while disconnected.
 func (m *ConnectionFailedModal) IsBlockingInput() bool {
-	return true
+	return false
 }

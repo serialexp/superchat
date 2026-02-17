@@ -108,7 +108,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ErrorMsg:
 		// Only show non-disconnect errors (disconnect is handled by DisconnectedMsg)
 		if msg.Err.Error() != "disconnected from server" {
-			m.errorMessage = msg.Err.Error()
+			return m, tea.Batch(m.setError(msg.Err.Error()), listenForServerFrames(m.conn, m.connGeneration))
 		}
 		return m, listenForServerFrames(m.conn, m.connGeneration)
 
@@ -138,16 +138,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.connectionState = StateDisconnected
 		m.errorMessage = ""
 
-		// Show connection failed modal to give user options
-		// BUT: Don't show if there's already a connection-related modal active
-		activeModalType := m.modalStack.TopType()
-		if activeModalType != modal.ModalConnectionFailed && activeModalType != modal.ModalConnectionMethod {
-			// Check if we have a server disconnect reason (from DISCONNECT message)
-			if m.serverDisconnectReason != "" {
+		// Only show modal when the server explicitly kicked us (DISCONNECT message).
+		// For normal connection drops, show an inline status and let auto-reconnect handle it.
+		if m.serverDisconnectReason != "" {
+			activeModalType := m.modalStack.TopType()
+			if activeModalType != modal.ModalConnectionFailed && activeModalType != modal.ModalConnectionMethod {
 				m.modalStack.Push(modal.NewConnectionFailedModalWithReason(m.conn.GetAddress(), m.serverDisconnectReason))
 				m.serverDisconnectReason = "" // Clear after use
-			} else {
-				m.modalStack.Push(modal.NewConnectionFailedModal(m.conn.GetAddress(), "Connection lost"))
 			}
 		}
 
@@ -191,9 +188,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Re-enable auto-reconnect and connect
 			m.conn.EnableAutoReconnect()
 			if err := m.conn.Connect(); err != nil {
-				m.errorMessage = fmt.Sprintf("Reconnect failed: %v", err)
 				m.connectionState = StateDisconnected
-				return m, nil
+				return m, m.setError(fmt.Sprintf("Reconnect failed: %v", err))
 			}
 			m.connectionState = StateReconnecting
 			return m, listenForServerFrames(m.conn, m.connGeneration)
@@ -237,6 +233,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Only clear if version matches (prevents stale timeouts from clearing new messages)
 		if msg.Version == m.statusVersion {
 			m.statusMessage = ""
+		}
+		return m, nil
+
+	case ClearErrorMsg:
+		// Only clear if version matches (prevents stale timeouts from clearing newer errors)
+		if msg.Version == m.errorVersion {
+			m.errorMessage = ""
 		}
 		return m, nil
 
@@ -451,8 +454,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		allCmds := append([]tea.Cmd{cmd}, modalCmds...)
 		return m, tea.Batch(allCmds...)
 	}
-
-	return m, nil
 }
 
 // handleKeyPress handles keyboard input
@@ -911,8 +912,6 @@ func (m Model) handleThreadViewKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.threadViewport, cmd = m.threadViewport.Update(msg)
 		return m, cmd
 	}
-
-	return m, nil
 }
 
 // handleChatChannelKeys handles keyboard input in chat channel view
@@ -1003,6 +1002,10 @@ func (m Model) handleChatChannelKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // sendChatMessageWithContent sends a chat message with the given content
 func (m Model) sendChatMessageWithContent(content string) (Model, tea.Cmd) {
+	if m.connectionState != StateConnected {
+		return m, m.setError("Cannot send: not connected to server")
+	}
+
 	if m.currentChannel == nil {
 		return m, nil
 	}
@@ -1018,8 +1021,7 @@ func (m Model) sendChatMessageWithContent(content string) (Model, tea.Cmd) {
 	if key, ok := m.dmChannelKeys[channelID]; ok {
 		encrypted, err := crypto.EncryptMessage(key, []byte(content))
 		if err != nil {
-			m.errorMessage = fmt.Sprintf("Failed to encrypt message: %v", err)
-			return m, nil
+			return m, m.setError(fmt.Sprintf("Failed to encrypt message: %v", err))
 		}
 		messageContent = string(encrypted)
 	}
@@ -1193,12 +1195,30 @@ func (m *Model) setStatus(message string) tea.Cmd {
 	return statusTimeout(m.statusVersion)
 }
 
+// ClearErrorMsg clears the error message after a timeout
+type ClearErrorMsg struct {
+	Version uint64 // Only clear if this matches current errorVersion
+}
+
+// errorTimeout returns a command that clears the error after 2 seconds
+func errorTimeout(version uint64) tea.Cmd {
+	return tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
+		return ClearErrorMsg{Version: version}
+	})
+}
+
+// setError sets the error message and returns the auto-clear timeout command
+func (m *Model) setError(message string) tea.Cmd {
+	m.errorVersion++
+	m.errorMessage = message
+	return errorTimeout(m.errorVersion)
+}
+
 // handleServerConfig processes SERVER_CONFIG
 func (m Model) handleServerConfig(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.ServerConfigMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
-		m.errorMessage = fmt.Sprintf("Failed to decode SERVER_CONFIG: %v", err)
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode SERVER_CONFIG: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	m.serverConfig = msg
@@ -1244,8 +1264,7 @@ func checkInitTimeout(delay time.Duration) tea.Cmd {
 func (m Model) handleNicknameResponse(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.NicknameResponseMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
-		m.errorMessage = fmt.Sprintf("Failed to decode response: %v", err)
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode response: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	var statusCmd tea.Cmd
@@ -1277,7 +1296,7 @@ func (m Model) handleNicknameResponse(frame *protocol.Frame) (tea.Model, tea.Cmd
 		m.modalStack.RemoveByType(modal.ModalNicknameSetup)
 	} else {
 		// Nickname rejected (invalid format, banned, etc.)
-		m.errorMessage = msg.Message
+		statusCmd = m.setError(msg.Message)
 	}
 
 	return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), statusCmd)
@@ -1287,8 +1306,7 @@ func (m Model) handleNicknameResponse(frame *protocol.Frame) (tea.Model, tea.Cmd
 func (m Model) handleUserInfo(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.UserInfoMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
-		m.errorMessage = fmt.Sprintf("Failed to decode USER_INFO: %v", err)
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode USER_INFO: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	// Log the response for debugging
@@ -1344,8 +1362,7 @@ func (m Model) handleAuthResponse(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 		if m.logger != nil {
 			m.logger.Printf("[ERROR] Failed to decode AUTH_RESPONSE: %v", err)
 		}
-		m.errorMessage = fmt.Sprintf("Failed to decode AUTH_RESPONSE: %v", err)
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode AUTH_RESPONSE: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	if m.logger != nil {
@@ -1403,19 +1420,20 @@ func (m Model) handleAuthResponse(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 
 	// Apply rate limiting with exponential backoff
 	if m.authAttempts >= 5 {
-		m.errorMessage = "Too many failed attempts. Please restart the application."
+		errCmd := m.setError("Too many failed attempts. Please restart the application.")
 		m.authState = AuthStateFailed
 		m.modalStack.RemoveByType(modal.ModalPasswordAuth)
-	} else {
-		if m.authAttempts >= 2 {
-			// Exponential backoff: 1s, 2s, 4s, 8s
-			cooldownSeconds := 1 << (m.authAttempts - 2) // 2^(attempts-2)
-			m.authCooldownUntil = time.Now().Add(time.Duration(cooldownSeconds) * time.Second)
-		}
-		// Update password modal with error message
-		m.modalStack.RemoveByType(modal.ModalPasswordAuth)
-		m.showPasswordModal()
+		return m, tea.Batch(errCmd, listenForServerFrames(m.conn, m.connGeneration))
 	}
+
+	if m.authAttempts >= 2 {
+		// Exponential backoff: 1s, 2s, 4s, 8s
+		cooldownSeconds := 1 << (m.authAttempts - 2) // 2^(attempts-2)
+		m.authCooldownUntil = time.Now().Add(time.Duration(cooldownSeconds) * time.Second)
+	}
+	// Update password modal with error message
+	m.modalStack.RemoveByType(modal.ModalPasswordAuth)
+	m.showPasswordModal()
 
 	return m, listenForServerFrames(m.conn, m.connGeneration)
 }
@@ -1424,8 +1442,7 @@ func (m Model) handleAuthResponse(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 func (m Model) handleRegisterResponse(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.RegisterResponseMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
-		m.errorMessage = fmt.Sprintf("Failed to decode REGISTER_RESPONSE: %v", err)
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode REGISTER_RESPONSE: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	var statusCmd tea.Cmd
@@ -1445,7 +1462,7 @@ func (m Model) handleRegisterResponse(frame *protocol.Frame) (tea.Model, tea.Cmd
 		m.userFlags = 0
 		// Registration failed - close modal and show error
 		m.modalStack.RemoveByType(modal.ModalRegistration)
-		m.errorMessage = "Registration failed. Please try again."
+		statusCmd = m.setError("Registration failed. Please try again.")
 	}
 
 	return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), statusCmd)
@@ -1457,8 +1474,7 @@ func (m Model) handleChannelList(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 
 	msg := &protocol.ChannelListMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
-		m.errorMessage = fmt.Sprintf("Failed to decode channel list: %v", err)
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode channel list: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	m.channels = msg.Channels
@@ -1495,7 +1511,7 @@ func (m Model) handleChannelList(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 		}
 
 		if err := m.conn.SendMessage(protocol.TypeGetUnreadCounts, unreadMsg); err != nil {
-			m.errorMessage = fmt.Sprintf("Failed to request unread counts: %v", err)
+			statusCmd = m.setError(fmt.Sprintf("Failed to request unread counts: %v", err))
 		}
 	}
 
@@ -1508,8 +1524,7 @@ func (m Model) handleSubchannelList(frame *protocol.Frame) (tea.Model, tea.Cmd) 
 
 	msg := &protocol.SubchannelListMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
-		m.errorMessage = fmt.Sprintf("Failed to decode subchannel list: %v", err)
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode subchannel list: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	// Only update if this is for the currently expanded channel
@@ -1524,8 +1539,7 @@ func (m Model) handleSubchannelList(frame *protocol.Frame) (tea.Model, tea.Cmd) 
 func (m Model) handleSubchannelCreated(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.SubchannelCreatedMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
-		m.errorMessage = fmt.Sprintf("Failed to decode subchannel created: %v", err)
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode subchannel created: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	var statusCmd tea.Cmd
@@ -1553,7 +1567,7 @@ func (m Model) handleSubchannelCreated(frame *protocol.Frame) (tea.Model, tea.Cm
 			}
 		}
 	} else {
-		m.errorMessage = msg.Message
+		statusCmd = m.setError(msg.Message)
 	}
 
 	return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), statusCmd)
@@ -1563,7 +1577,7 @@ func (m Model) handleSubchannelCreated(frame *protocol.Frame) (tea.Model, tea.Cm
 func (m Model) handleServerList(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.ServerListMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
-		m.errorMessage = fmt.Sprintf("Failed to decode server list: %v", err)
+		errCmd := m.setError(fmt.Sprintf("Failed to decode server list: %v", err))
 
 		// Update modal to show error
 		if activeModal := m.modalStack.Top(); activeModal != nil {
@@ -1572,7 +1586,7 @@ func (m Model) handleServerList(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(errCmd, listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	// Clear awaiting flag since we got a response
@@ -1600,8 +1614,7 @@ func (m Model) handleChannelCreated(frame *protocol.Frame) (tea.Model, tea.Cmd) 
 	msg := &protocol.ChannelCreatedMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
 		m.statusMessage = "" // Clear in-progress status
-		m.errorMessage = fmt.Sprintf("Failed to decode channel created: %v", err)
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode channel created: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	var statusCmd tea.Cmd
@@ -1625,7 +1638,7 @@ func (m Model) handleChannelCreated(frame *protocol.Frame) (tea.Model, tea.Cmd) 
 	} else {
 		// Keep modal open but show error
 		m.statusMessage = "" // Clear in-progress status
-		m.errorMessage = msg.Message
+		statusCmd = m.setError(msg.Message)
 	}
 
 	return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), statusCmd)
@@ -1636,8 +1649,7 @@ func (m Model) handleChannelDeleted(frame *protocol.Frame) (tea.Model, tea.Cmd) 
 	msg := &protocol.ChannelDeletedMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
 		m.statusMessage = "" // Clear in-progress status
-		m.errorMessage = fmt.Sprintf("Failed to decode channel deleted: %v", err)
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode channel deleted: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	var statusCmd tea.Cmd
@@ -1668,7 +1680,7 @@ func (m Model) handleChannelDeleted(frame *protocol.Frame) (tea.Model, tea.Cmd) 
 	} else {
 		// Keep modal open but show error
 		m.statusMessage = "" // Clear in-progress status
-		m.errorMessage = msg.Message
+		statusCmd = m.setError(msg.Message)
 	}
 
 	return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), statusCmd)
@@ -1678,8 +1690,7 @@ func (m Model) handleChannelDeleted(frame *protocol.Frame) (tea.Model, tea.Cmd) 
 func (m Model) handleJoinResponse(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.JoinResponseMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
-		m.errorMessage = fmt.Sprintf("Failed to decode join response: %v", err)
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode join response: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	if msg.Success {
@@ -1693,16 +1704,14 @@ func (m Model) handleJoinResponse(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 	}
 
-	m.errorMessage = msg.Message
-	return m, listenForServerFrames(m.conn, m.connGeneration)
+	return m, tea.Batch(m.setError(msg.Message), listenForServerFrames(m.conn, m.connGeneration))
 }
 
 // handleLeaveResponse processes LEAVE_RESPONSE
 func (m Model) handleLeaveResponse(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.LeaveResponseMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
-		m.errorMessage = fmt.Sprintf("Failed to decode leave response: %v", err)
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode leave response: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	var statusCmd tea.Cmd
@@ -1711,7 +1720,7 @@ func (m Model) handleLeaveResponse(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 		m.clearActiveChannel()
 		delete(m.channelRoster, msg.ChannelID)
 	} else {
-		m.errorMessage = msg.Message
+		statusCmd = m.setError(msg.Message)
 	}
 
 	return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), statusCmd)
@@ -1721,11 +1730,10 @@ func (m Model) handleLeaveResponse(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 func (m Model) handleMessageList(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.MessageListMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
-		m.errorMessage = fmt.Sprintf("Failed to decode message list: %v", err)
 		m.loadingThreadList = false
 		m.loadingThreadReplies = false
 		m.loadingMore = false
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode message list: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	// Decrypt messages if channel has encryption enabled
@@ -1856,8 +1864,7 @@ func (m Model) handleMessagePosted(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.MessagePostedMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
 		m.statusMessage = "" // Clear "Sending..." status
-		m.errorMessage = fmt.Sprintf("Failed to decode response: %v", err)
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode response: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	var statusCmd tea.Cmd
@@ -1869,7 +1876,7 @@ func (m Model) handleMessagePosted(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 		// will add it to the appropriate list (threads or threadReplies)
 	} else {
 		m.statusMessage = "" // Clear "Sending..." status
-		m.errorMessage = msg.Message
+		statusCmd = m.setError(msg.Message)
 	}
 
 	return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), statusCmd)
@@ -1879,8 +1886,7 @@ func (m Model) handleMessagePosted(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 func (m Model) handleNewMessage(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.NewMessageMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
-		m.errorMessage = fmt.Sprintf("Failed to decode new message: %v", err)
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode new message: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	// Convert to protocol.Message
@@ -2016,8 +2022,7 @@ func (m Model) handleMessageDeleted(frame *protocol.Frame) (tea.Model, tea.Cmd) 
 
 	msg := &protocol.MessageDeletedMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
-		m.errorMessage = fmt.Sprintf("Failed to decode message deletion: %v", err)
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode message deletion: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	var statusCmd tea.Cmd
@@ -2025,7 +2030,7 @@ func (m Model) handleMessageDeleted(frame *protocol.Frame) (tea.Model, tea.Cmd) 
 		m.applyMessageDeletion(msg.MessageID, msg.Message)
 		statusCmd = m.setStatus("Message deleted")
 	} else {
-		m.errorMessage = msg.Message
+		statusCmd = m.setError(msg.Message)
 	}
 
 	return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), statusCmd)
@@ -2037,8 +2042,7 @@ func (m Model) handleMessageEdited(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 
 	msg := &protocol.MessageEditedMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
-		m.errorMessage = fmt.Sprintf("Failed to decode message edit: %v", err)
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode message edit: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	var statusCmd tea.Cmd
@@ -2046,7 +2050,7 @@ func (m Model) handleMessageEdited(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 		m.applyMessageEdit(msg.MessageID, msg.NewContent, msg.EditedAt)
 		statusCmd = m.setStatus("Message edited")
 	} else {
-		m.errorMessage = msg.Message
+		statusCmd = m.setError(msg.Message)
 	}
 
 	return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), statusCmd)
@@ -2056,8 +2060,7 @@ func (m Model) handleMessageEdited(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 func (m Model) handleSubscribeOk(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.SubscribeOkMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
-		m.errorMessage = fmt.Sprintf("Failed to decode subscribe OK: %v", err)
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode subscribe OK: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	// Subscription confirmed - no user-visible action needed
@@ -2071,21 +2074,17 @@ func (m Model) handleSubscribeOk(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 func (m Model) handleError(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.ErrorMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
-		m.errorMessage = fmt.Sprintf("Failed to decode error: %v", err)
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode error: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
-	m.errorMessage = fmt.Sprintf("Error %d: %s", msg.ErrorCode, msg.Message)
-
-	return m, listenForServerFrames(m.conn, m.connGeneration)
+	return m, tea.Batch(m.setError(fmt.Sprintf("Error %d: %s", msg.ErrorCode, msg.Message)), listenForServerFrames(m.conn, m.connGeneration))
 }
 
 // handleDisconnect processes DISCONNECT messages from the server
 func (m Model) handleDisconnect(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.DisconnectMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
-		m.errorMessage = fmt.Sprintf("Failed to decode disconnect message: %v", err)
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode disconnect message: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	// Store the disconnect reason for display in modal
@@ -2776,6 +2775,9 @@ func (m Model) handleReconnected() (tea.Model, tea.Cmd) {
 	m.reconnectAttempt = 0
 	m.errorMessage = ""
 
+	// Dismiss any lingering connection failure modal
+	m.modalStack.RemoveByType(modal.ModalConnectionFailed)
+
 	// Re-request data based on current view
 	cmds := []tea.Cmd{
 		listenForServerFrames(m.conn, m.connGeneration),
@@ -2828,8 +2830,7 @@ func (m Model) handleServerSelected(server protocol.ServerInfo) (tea.Model, tea.
 
 	// Save to state for next startup (using directory-specific key)
 	if err := m.state.SetConfig("directory_selected_server", serverAddr); err != nil {
-		m.errorMessage = fmt.Sprintf("Failed to save server address: %v", err)
-		return m, nil
+		return m, m.setError(fmt.Sprintf("Failed to save server address: %v", err))
 	}
 
 	// Check if selected server is the same as current connection
@@ -2898,8 +2899,7 @@ func (m Model) handleServerSelected(server protocol.ServerInfo) (tea.Model, tea.
 	// Create connection to new server (returns concrete *Connection type)
 	conn, err := client.NewConnection(address)
 	if err != nil {
-		m.errorMessage = fmt.Sprintf("Failed to create connection: %v", err)
-		return m, nil
+		return m, m.setError(fmt.Sprintf("Failed to create connection: %v", err))
 	}
 
 	// Set logger if we have one (using concrete type methods)
@@ -2918,8 +2918,7 @@ func (m Model) handleServerSelected(server protocol.ServerInfo) (tea.Model, tea.
 
 	// Connect to server
 	if err := conn.Connect(); err != nil {
-		m.errorMessage = fmt.Sprintf("Failed to connect to %s: %v", server.Name, err)
-		return m, nil
+		return m, m.setError(fmt.Sprintf("Failed to connect to %s: %v", server.Name, err))
 	}
 
 	// Update model state
@@ -2987,8 +2986,7 @@ func (m Model) handleCustomServerInput(address string) (tea.Model, tea.Cmd) {
 
 	// Save to state for next startup
 	if err := m.state.SetConfig("directory_selected_server", serverAddr); err != nil {
-		m.errorMessage = fmt.Sprintf("Failed to save server address: %v", err)
-		return m, nil
+		return m, m.setError(fmt.Sprintf("Failed to save server address: %v", err))
 	}
 
 	// Reuse the server selection logic
@@ -3251,8 +3249,7 @@ func (m Model) handleConnectionAttemptResult(msg ConnectionAttemptResultMsg) (te
 func (m Model) handleSSHKeyList(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.SSHKeyListResponse{}
 	if err := msg.Decode(frame.Payload); err != nil {
-		m.errorMessage = fmt.Sprintf("Failed to decode SSH_KEY_LIST: %v", err)
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode SSH_KEY_LIST: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	// Convert to modal.SSHKeyInfo format
@@ -3281,8 +3278,7 @@ func (m Model) handleSSHKeyList(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 func (m Model) handleSSHKeyAdded(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.SSHKeyAddedResponse{}
 	if err := msg.Decode(frame.Payload); err != nil {
-		m.errorMessage = fmt.Sprintf("Failed to decode SSH_KEY_ADDED: %v", err)
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode SSH_KEY_ADDED: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	if msg.Success {
@@ -3291,15 +3287,13 @@ func (m Model) handleSSHKeyAdded(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), m.sendListSSHKeys(), statusCmd)
 	}
 
-	m.errorMessage = msg.ErrorMessage
-	return m, listenForServerFrames(m.conn, m.connGeneration)
+	return m, tea.Batch(m.setError(msg.ErrorMessage), listenForServerFrames(m.conn, m.connGeneration))
 }
 
 func (m Model) handleSSHKeyLabelUpdated(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.SSHKeyLabelUpdatedResponse{}
 	if err := msg.Decode(frame.Payload); err != nil {
-		m.errorMessage = fmt.Sprintf("Failed to decode SSH_KEY_LABEL_UPDATED: %v", err)
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode SSH_KEY_LABEL_UPDATED: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	if msg.Success {
@@ -3308,15 +3302,13 @@ func (m Model) handleSSHKeyLabelUpdated(frame *protocol.Frame) (tea.Model, tea.C
 		return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), m.sendListSSHKeys(), statusCmd)
 	}
 
-	m.errorMessage = msg.ErrorMessage
-	return m, listenForServerFrames(m.conn, m.connGeneration)
+	return m, tea.Batch(m.setError(msg.ErrorMessage), listenForServerFrames(m.conn, m.connGeneration))
 }
 
 func (m Model) handleSSHKeyDeleted(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.SSHKeyDeletedResponse{}
 	if err := msg.Decode(frame.Payload); err != nil {
-		m.errorMessage = fmt.Sprintf("Failed to decode SSH_KEY_DELETED: %v", err)
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode SSH_KEY_DELETED: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	if msg.Success {
@@ -3324,8 +3316,7 @@ func (m Model) handleSSHKeyDeleted(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 		// Refresh the key list
 		return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), m.sendListSSHKeys(), statusCmd)
 	} else {
-		m.errorMessage = msg.ErrorMessage
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(msg.ErrorMessage), listenForServerFrames(m.conn, m.connGeneration))
 	}
 }
 
@@ -3478,8 +3469,7 @@ func (m Model) handleUserBanned(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.UserBannedMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
 		m.statusMessage = "" // Clear in-progress status
-		m.errorMessage = fmt.Sprintf("Failed to decode USER_BANNED: %v", err)
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode USER_BANNED: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	var statusCmd tea.Cmd
@@ -3489,7 +3479,7 @@ func (m Model) handleUserBanned(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 		m.modalStack.RemoveByType(modal.ModalBanUser)
 	} else {
 		m.statusMessage = "" // Clear in-progress status
-		m.errorMessage = msg.Message
+		statusCmd = m.setError(msg.Message)
 	}
 
 	return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), statusCmd)
@@ -3499,8 +3489,7 @@ func (m Model) handleIPBanned(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.IPBannedMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
 		m.statusMessage = "" // Clear in-progress status
-		m.errorMessage = fmt.Sprintf("Failed to decode IP_BANNED: %v", err)
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode IP_BANNED: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	var statusCmd tea.Cmd
@@ -3510,7 +3499,7 @@ func (m Model) handleIPBanned(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 		m.modalStack.RemoveByType(modal.ModalBanIP)
 	} else {
 		m.statusMessage = "" // Clear in-progress status
-		m.errorMessage = msg.Message
+		statusCmd = m.setError(msg.Message)
 	}
 
 	return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), statusCmd)
@@ -3520,8 +3509,7 @@ func (m Model) handleUserUnbanned(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.UserUnbannedMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
 		m.statusMessage = "" // Clear in-progress status
-		m.errorMessage = fmt.Sprintf("Failed to decode USER_UNBANNED: %v", err)
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode USER_UNBANNED: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	var statusCmd tea.Cmd
@@ -3531,7 +3519,7 @@ func (m Model) handleUserUnbanned(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 		m.modalStack.RemoveByType(modal.ModalUnban)
 	} else {
 		m.statusMessage = "" // Clear in-progress status
-		m.errorMessage = msg.Message
+		statusCmd = m.setError(msg.Message)
 	}
 
 	return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), statusCmd)
@@ -3541,8 +3529,7 @@ func (m Model) handleIPUnbanned(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.IPUnbannedMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
 		m.statusMessage = "" // Clear in-progress status
-		m.errorMessage = fmt.Sprintf("Failed to decode IP_UNBANNED: %v", err)
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode IP_UNBANNED: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	var statusCmd tea.Cmd
@@ -3552,7 +3539,7 @@ func (m Model) handleIPUnbanned(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 		m.modalStack.RemoveByType(modal.ModalUnban)
 	} else {
 		m.statusMessage = "" // Clear in-progress status
-		m.errorMessage = msg.Message
+		statusCmd = m.setError(msg.Message)
 	}
 
 	return m, tea.Batch(listenForServerFrames(m.conn, m.connGeneration), statusCmd)
@@ -3561,8 +3548,7 @@ func (m Model) handleIPUnbanned(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 func (m Model) handleBanList(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.BanListMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
-		m.errorMessage = fmt.Sprintf("Failed to decode BAN_LIST: %v", err)
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode BAN_LIST: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	// Find and update the view bans modal directly on the stack
@@ -3594,8 +3580,7 @@ func (m Model) handleBanList(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 func (m Model) handleUserList(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.UserListMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
-		m.errorMessage = fmt.Sprintf("Failed to decode USER_LIST: %v", err)
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode USER_LIST: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	if m.logger != nil {
@@ -3639,8 +3624,7 @@ func (m Model) handleUserList(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 func (m Model) handleChannelUserList(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.ChannelUserListMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
-		m.errorMessage = fmt.Sprintf("Failed to decode CHANNEL_USER_LIST: %v", err)
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode CHANNEL_USER_LIST: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	roster := make(map[uint64]presenceEntry, len(msg.Users))
@@ -3674,8 +3658,7 @@ func (m Model) handleChannelUserList(frame *protocol.Frame) (tea.Model, tea.Cmd)
 func (m Model) handleChannelPresence(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.ChannelPresenceMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
-		m.errorMessage = fmt.Sprintf("Failed to decode CHANNEL_PRESENCE: %v", err)
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode CHANNEL_PRESENCE: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	entry := presenceEntry{
@@ -3724,8 +3707,7 @@ func (m Model) handleChannelPresence(frame *protocol.Frame) (tea.Model, tea.Cmd)
 func (m Model) handleServerPresence(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.ServerPresenceMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
-		m.errorMessage = fmt.Sprintf("Failed to decode SERVER_PRESENCE: %v", err)
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode SERVER_PRESENCE: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	entry := presenceEntry{
@@ -3753,8 +3735,7 @@ func (m Model) handleServerPresence(frame *protocol.Frame) (tea.Model, tea.Cmd) 
 func (m Model) handleUnreadCounts(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.UnreadCountsMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
-		m.errorMessage = fmt.Sprintf("Failed to decode UNREAD_COUNTS: %v", err)
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode UNREAD_COUNTS: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	// Update unread counts map
@@ -3772,8 +3753,7 @@ func (m Model) handleUserDeleted(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.UserDeletedMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
 		m.statusMessage = "" // Clear in-progress status
-		m.errorMessage = fmt.Sprintf("Failed to decode USER_DELETED: %v", err)
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode USER_DELETED: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	cmds := []tea.Cmd{listenForServerFrames(m.conn, m.connGeneration)}
@@ -3785,7 +3765,7 @@ func (m Model) handleUserDeleted(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.sendListUsers(true))
 	} else {
 		m.statusMessage = "" // Clear in-progress status
-		m.errorMessage = msg.Message
+		cmds = append(cmds, m.setError(msg.Message))
 	}
 
 	return m, tea.Batch(cmds...)
@@ -3796,8 +3776,7 @@ func (m Model) handleUserDeleted(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 func (m Model) handleKeyRequired(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.KeyRequiredMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
-		m.errorMessage = fmt.Sprintf("Failed to decode KEY_REQUIRED: %v", err)
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode KEY_REQUIRED: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	if m.logger != nil {
@@ -3814,8 +3793,7 @@ func (m Model) handleKeyRequired(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 func (m Model) handleDMReady(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.DMReadyMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
-		m.errorMessage = fmt.Sprintf("Failed to decode DM_READY: %v", err)
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode DM_READY: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	if m.logger != nil {
@@ -3839,14 +3817,12 @@ func (m Model) handleDMReady(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 		if m.encryptionKeyPriv != nil {
 			sharedSecret, err := crypto.ComputeSharedSecret(m.encryptionKeyPriv, msg.OtherPublicKey[:])
 			if err != nil {
-				m.errorMessage = fmt.Sprintf("Failed to compute shared secret: %v", err)
-				return m, listenForServerFrames(m.conn, m.connGeneration)
+				return m, tea.Batch(m.setError(fmt.Sprintf("Failed to compute shared secret: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 			}
 
 			channelKey, err := crypto.DeriveChannelKey(sharedSecret, msg.ChannelID)
 			if err != nil {
-				m.errorMessage = fmt.Sprintf("Failed to derive channel key: %v", err)
-				return m, listenForServerFrames(m.conn, m.connGeneration)
+				return m, tea.Batch(m.setError(fmt.Sprintf("Failed to derive channel key: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 			}
 
 			m.dmChannelKeys[msg.ChannelID] = channelKey
@@ -3854,8 +3830,7 @@ func (m Model) handleDMReady(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 				m.logger.Printf("[DM] Derived channel key for channel %d", msg.ChannelID)
 			}
 		} else {
-			m.errorMessage = "Cannot set up encrypted DM: no encryption key available"
-			return m, listenForServerFrames(m.conn, m.connGeneration)
+			return m, tea.Batch(m.setError("Cannot set up encrypted DM: no encryption key available"), listenForServerFrames(m.conn, m.connGeneration))
 		}
 	}
 
@@ -3898,8 +3873,7 @@ func (m Model) handleDMReady(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 func (m Model) handleDMPending(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.DMPendingMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
-		m.errorMessage = fmt.Sprintf("Failed to decode DM_PENDING: %v", err)
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode DM_PENDING: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	if m.logger != nil {
@@ -3934,8 +3908,7 @@ func (m Model) handleDMPending(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 func (m Model) handleDMRequest(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.DMRequestMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
-		m.errorMessage = fmt.Sprintf("Failed to decode DM_REQUEST: %v", err)
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode DM_REQUEST: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	if m.logger != nil {
@@ -3996,8 +3969,7 @@ func (m Model) handleDMRequest(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 func (m Model) handleDMParticipantLeft(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.DMParticipantLeftMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
-		m.errorMessage = fmt.Sprintf("Failed to decode DM_PARTICIPANT_LEFT: %v", err)
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode DM_PARTICIPANT_LEFT: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	if m.logger != nil {
@@ -4037,8 +4009,7 @@ func (m Model) handleDMParticipantLeft(frame *protocol.Frame) (tea.Model, tea.Cm
 func (m Model) handleDMDeclined(frame *protocol.Frame) (tea.Model, tea.Cmd) {
 	msg := &protocol.DMDeclinedMessage{}
 	if err := msg.Decode(frame.Payload); err != nil {
-		m.errorMessage = fmt.Sprintf("Failed to decode DM_DECLINED: %v", err)
-		return m, listenForServerFrames(m.conn, m.connGeneration)
+		return m, tea.Batch(m.setError(fmt.Sprintf("Failed to decode DM_DECLINED: %v", err)), listenForServerFrames(m.conn, m.connGeneration))
 	}
 
 	if m.logger != nil {

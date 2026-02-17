@@ -24,26 +24,6 @@ func (m Model) View() string {
 		return m.renderPrivacyDelayOverlay()
 	}
 
-	// Render disconnection/reconnecting overlay if not connected
-	// BUT: If there's a modal active (e.g., ConnectionFailedModal), show that instead
-	// ALSO: Don't show overlay when switching connection methods (prevent flash)
-	if m.connectionState == StateDisconnected && m.modalStack.IsEmpty() {
-		if m.switchingMethod {
-			// Don't show overlay while switching methods
-			if m.logger != nil {
-				m.logger.Printf("DEBUG: Suppressing disconnect overlay (switchingMethod=true)")
-			}
-		} else {
-			if m.logger != nil {
-				m.logger.Printf("DEBUG: Showing disconnect overlay (switchingMethod=false, modalStack empty)")
-			}
-			return m.renderDisconnectedOverlay()
-		}
-	}
-	if m.connectionState == StateReconnecting && m.modalStack.IsEmpty() && !m.switchingMethod {
-		return m.renderReconnectingOverlay()
-	}
-
 	// Render base view
 	var baseView string
 	switch m.currentView {
@@ -466,8 +446,17 @@ func (m Model) renderHelp() string {
 func (m Model) renderHeader() string {
 	left := HeaderStyle.Render(fmt.Sprintf("SuperChat %s", m.currentVersion))
 
-	status := "Disconnected"
-	if m.conn.IsConnected() {
+	var right string
+	switch {
+	case m.connectionState == StateReconnecting:
+		status := fmt.Sprintf("Reconnecting (attempt %d)...", m.reconnectAttempt)
+		right = lipgloss.NewStyle().Foreground(WarningColor).Padding(0, 1).Render(status)
+
+	case m.connectionState == StateDisconnected:
+		right = lipgloss.NewStyle().Foreground(ErrorColor).Padding(0, 1).Render("Disconnected")
+
+	case m.conn.IsConnected():
+		status := ""
 		if m.nickname != "" {
 			// Show auth status: ~ for anonymous, no prefix for authenticated
 			prefix := ""
@@ -494,9 +483,11 @@ func (m Model) renderHeader() string {
 			throttle := MutedTextStyle.Render(fmt.Sprintf("  ⏱ %s", bandwidth))
 			status += throttle
 		}
-	}
+		right = StatusStyle.Render(status)
 
-	right := StatusStyle.Render(status)
+	default:
+		right = StatusStyle.Render("Disconnected")
+	}
 
 	spacer := strings.Repeat(" ", max(0, m.width-lipgloss.Width(left)-lipgloss.Width(right)))
 
@@ -1537,156 +1528,6 @@ func (m *Model) scrollThreadListToKeepCursorVisible() {
 	m.threadListViewport.SetYOffset(targetOffset)
 }
 
-// renderDisconnectedOverlay renders a full-screen overlay when disconnected
-func (m Model) renderDisconnectedOverlay() string {
-	title := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(ErrorColor).
-		Align(lipgloss.Center).
-		MarginBottom(2).
-		Render("⚠  CONNECTION LOST  ⚠")
-
-	message := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("252")).
-		Align(lipgloss.Center).
-		MarginBottom(1).
-		Render("The connection to the server has been lost.")
-
-	// Show what methods have been tried
-	connType := m.conn.GetConnectionType()
-	var methodInfo string
-	if connType != "" {
-		var methodName string
-		switch connType {
-		case "tcp":
-			methodName = "TCP (binary protocol)"
-		case "ssh":
-			methodName = "SSH"
-		case "websocket":
-			methodName = "WebSocket"
-		default:
-			methodName = connType
-		}
-		methodInfo = fmt.Sprintf("Tried: %s + WebSocket fallback", methodName)
-	}
-
-	var contentParts []string
-	contentParts = append(contentParts, "")
-	contentParts = append(contentParts, title)
-	contentParts = append(contentParts, message)
-
-	if methodInfo != "" {
-		methods := lipgloss.NewStyle().
-			Foreground(MutedColor).
-			Align(lipgloss.Center).
-			MarginBottom(1).
-			Render(methodInfo)
-		contentParts = append(contentParts, methods)
-	}
-
-	info := lipgloss.NewStyle().
-		Foreground(MutedColor).
-		Align(lipgloss.Center).
-		Render("Attempting to reconnect...")
-	contentParts = append(contentParts, info)
-	contentParts = append(contentParts, "")
-
-	content := lipgloss.JoinVertical(
-		lipgloss.Center,
-		contentParts...,
-	)
-
-	box := lipgloss.NewStyle().
-		Border(lipgloss.DoubleBorder()).
-		BorderForeground(ErrorColor).
-		Padding(2, 4).
-		Render(content)
-
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
-}
-
-// renderReconnectingOverlay renders a full-screen overlay when reconnecting
-func (m Model) renderReconnectingOverlay() string {
-	title := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(WarningColor).
-		Align(lipgloss.Center).
-		MarginBottom(2).
-		Render("RECONNECTING...")
-
-	attemptMsg := fmt.Sprintf("Attempt %d", m.reconnectAttempt)
-	message := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("252")).
-		Align(lipgloss.Center).
-		MarginBottom(1).
-		Render(attemptMsg)
-
-	// Show what methods have been tried
-	methodInfo := ""
-	connType := m.conn.GetConnectionType()
-	if connType != "" {
-		var methodName string
-		switch connType {
-		case "tcp":
-			methodName = "TCP (binary protocol)"
-		case "ssh":
-			methodName = "SSH"
-		case "websocket":
-			methodName = "WebSocket"
-		default:
-			methodName = connType
-		}
-
-		if m.reconnectAttempt > 1 {
-			methodInfo = fmt.Sprintf("Tried: %s + WebSocket fallback", methodName)
-		} else {
-			methodInfo = fmt.Sprintf("Trying: %s", methodName)
-		}
-	}
-
-	var contentParts []string
-	contentParts = append(contentParts, "")
-	contentParts = append(contentParts, title)
-	contentParts = append(contentParts, message)
-
-	if methodInfo != "" {
-		methods := lipgloss.NewStyle().
-			Foreground(MutedColor).
-			Align(lipgloss.Center).
-			MarginBottom(1).
-			Render(methodInfo)
-		contentParts = append(contentParts, methods)
-	}
-
-	info := lipgloss.NewStyle().
-		Foreground(MutedColor).
-		Align(lipgloss.Center).
-		Render("Please wait while we restore your connection...")
-	contentParts = append(contentParts, info)
-
-	// Animated dots based on attempt number
-	dots := strings.Repeat(".", (m.reconnectAttempt % 4))
-	spinner := lipgloss.NewStyle().
-		Foreground(PrimaryColor).
-		Align(lipgloss.Center).
-		MarginTop(1).
-		Render(dots)
-	contentParts = append(contentParts, spinner)
-	contentParts = append(contentParts, "")
-
-	content := lipgloss.JoinVertical(
-		lipgloss.Center,
-		contentParts...,
-	)
-
-	box := lipgloss.NewStyle().
-		Border(lipgloss.DoubleBorder()).
-		BorderForeground(WarningColor).
-		Padding(2, 4).
-		Render(content)
-
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
-}
 
 // renderPrivacyDelayOverlay renders a countdown overlay during privacy delay
 func (m Model) renderPrivacyDelayOverlay() string {

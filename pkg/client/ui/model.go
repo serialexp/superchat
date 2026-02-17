@@ -190,6 +190,7 @@ type Model struct {
 
 	// Error and status
 	errorMessage           string
+	errorVersion           uint64 // Incremented each time errorMessage is set, for auto-clear
 	statusMessage          string
 	statusVersion          uint64 // Incremented each time statusMessage is set, for timeout tracking
 	serverDisconnectReason string // Reason provided by server in DISCONNECT message
@@ -1556,8 +1557,7 @@ func (m *Model) createDeleteUserModal() (modal.Modal, tea.Cmd) {
 		} else if id, ok := m.lookupUserID(nickname); ok {
 			targetID = id
 		} else {
-			m.errorMessage = fmt.Sprintf("Unknown user '%s'. Refresh the user list (press [R]) and try again.", nickname)
-			return nil
+			return m.setError(fmt.Sprintf("Unknown user '%s'. Refresh the user list (press [R]) and try again.", nickname))
 		}
 
 		m.statusMessage = fmt.Sprintf("Deleting user %s...", nickname)

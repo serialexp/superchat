@@ -264,6 +264,9 @@ func (m Model) goBack() (Model, tea.Cmd) {
 }
 
 func (m Model) openNewThreadCompose() (Model, tea.Cmd) {
+	if m.connectionState != StateConnected {
+		return m, m.setError("Cannot compose: not connected to server")
+	}
 	if m.currentChannel == nil {
 		return m, nil
 	}
@@ -275,6 +278,9 @@ func (m Model) openNewThreadCompose() (Model, tea.Cmd) {
 }
 
 func (m Model) openReplyCompose() (Model, tea.Cmd) {
+	if m.connectionState != StateConnected {
+		return m, m.setError("Cannot compose: not connected to server")
+	}
 	msg, ok := m.selectedMessage()
 	if !ok {
 		return m, nil
@@ -287,6 +293,9 @@ func (m Model) openReplyCompose() (Model, tea.Cmd) {
 }
 
 func (m Model) openEditMessage() (Model, tea.Cmd) {
+	if m.connectionState != StateConnected {
+		return m, m.setError("Cannot edit: not connected to server")
+	}
 	msg, ok := m.selectedMessage()
 	if !ok {
 		return m, nil
@@ -300,6 +309,9 @@ func (m Model) openEditMessage() (Model, tea.Cmd) {
 }
 
 func (m Model) deleteMessage() (Model, tea.Cmd) {
+	if m.connectionState != StateConnected {
+		return m, m.setError("Cannot delete: not connected to server")
+	}
 	msg, ok := m.selectedMessage()
 	if !ok {
 		return m, nil
@@ -328,6 +340,9 @@ func (m Model) openAdminPanel() (Model, tea.Cmd) {
 }
 
 func (m Model) openCreateChannel() (Model, tea.Cmd) {
+	if m.connectionState != StateConnected {
+		return m, m.setError("Cannot create channel: not connected to server")
+	}
 	if !m.IsAdmin() {
 		return m, nil
 	}
@@ -339,6 +354,9 @@ func (m Model) openCreateChannel() (Model, tea.Cmd) {
 // === Existing helper methods that we're calling ===
 
 func (m Model) selectCurrentChannel() (Model, tea.Cmd) {
+	if m.connectionState != StateConnected {
+		return m, m.setError("Cannot join channel: not connected to server")
+	}
 	item := m.getChannelListItemAtCursor()
 	if item == nil {
 		return m, nil
