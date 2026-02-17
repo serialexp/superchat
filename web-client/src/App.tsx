@@ -344,21 +344,6 @@ const App: Component = () => {
     store.setNickname(nickname)
     storeActions.updateTraffic({ throttleBytesPerSecond: throttleBps })
 
-    // Restore encryption keys from localStorage
-    try {
-      const pubB64 = localStorage.getItem('superchat-encryption-pub')
-      const privB64 = localStorage.getItem('superchat-encryption-priv')
-      if (pubB64 && privB64) {
-        const pub = new Uint8Array(atob(pubB64).split('').map(c => c.charCodeAt(0)))
-        const priv = new Uint8Array(atob(privB64).split('').map(c => c.charCodeAt(0)))
-        if (pub.length === 32 && priv.length === 32) {
-          store.setEncryptionKeyPub(pub)
-          store.setEncryptionKeyPriv(priv)
-          console.log('Restored encryption keys from localStorage')
-        }
-      }
-    } catch { /* localStorage not available */ }
-
     client.connect(url, nickname)
   }
 
@@ -681,7 +666,7 @@ const App: Component = () => {
                   </Show>
                   <Show when={isCurrentChannelDM()}>
                     <Show when={currentDMChannel()?.isEncrypted}>
-                      <span class="badge badge-info badge-sm gap-1">{'\u{1F512}'} Encrypted</span>
+                      <span class="badge badge-info badge-sm gap-1" title="Ephemeral encryption - keys lost on page close">{'\u{1F512}'} Encrypted (session only)</span>
                     </Show>
                     <Show when={currentDMChannel()?.participantLeft}>
                       <span class="badge badge-warning badge-sm">Partner left</span>

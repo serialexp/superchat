@@ -72,6 +72,16 @@ export function generateX25519KeyPair(): X25519KeyPair {
 }
 
 /**
+ * Derive X25519 public key from a private key.
+ */
+export function publicKeyFromPrivate(privateKey: Uint8Array): Uint8Array {
+  if (privateKey.length !== X25519_KEY_SIZE) {
+    throw new Error(`Invalid private key size: ${privateKey.length}`)
+  }
+  return x25519.scalarMultBase(privateKey)
+}
+
+/**
  * Compute X25519 shared secret. Validates against low-order points.
  */
 export function computeSharedSecret(myPrivateKey: Uint8Array, theirPublicKey: Uint8Array): Uint8Array {
