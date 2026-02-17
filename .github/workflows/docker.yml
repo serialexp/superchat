@@ -158,4 +158,4 @@ jobs:
     steps:
       - name: Trigger Portainer stack update
         run: |
-          curl -sf -X POST https://portainer.jp.serial-experiments.com/api/stacks/webhooks/348fcbd4-71ce-4553-9e81-67fda8d88ffe
+          curl -sf -X POST https://portainer.jp.serial-experiments.com/api/stacks/webhooks/b8f2afbb-d0a0-457e-a381-9a2ce598144d
