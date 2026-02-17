@@ -64,6 +64,7 @@ node_modules
 
 # Web client build output
 web-client/dist/
+legacy-web-client/dist/
 
 # Website embedded web client (built from web-client/)
 website/public/app/

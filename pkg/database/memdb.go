@@ -1436,7 +1436,33 @@ func (m *MemDB) GetUserEncryptionKey(userID int64) ([]byte, error) {
 
 // CreateDMChannel creates a new DM channel between two users
 func (m *MemDB) CreateDMChannel(user1ID, user2ID int64, isEncrypted bool) (int64, error) {
-	return m.sqliteDB.CreateDMChannel(user1ID, user2ID, isEncrypted)
+	channelID, err := m.sqliteDB.CreateDMChannel(user1ID, user2ID, isEncrypted)
+	if err != nil {
+		return 0, err
+	}
+
+	// Add the channel to the in-memory cache so JoinChannel can find it
+	dmName := fmt.Sprintf("dm_%d_%d", user1ID, user2ID)
+	if user1ID > user2ID {
+		dmName = fmt.Sprintf("dm_%d_%d", user2ID, user1ID)
+	}
+	ch := &Channel{
+		ID:                    channelID,
+		Name:                  dmName,
+		DisplayName:           "Direct Message",
+		ChannelType:           0,
+		MessageRetentionHours: 168,
+		CreatedAt:             time.Now().UnixMilli(),
+		IsPrivate:             true,
+		IsDM:                  true,
+	}
+
+	m.mu.Lock()
+	m.channels[channelID] = ch
+	m.mu.Unlock()
+
+	log.Printf("MemDB: added encrypted DM channel to cache: id=%d", channelID)
+	return channelID, nil
 }
 
 // GetDMChannels returns all DM channels for a user

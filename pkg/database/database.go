@@ -2404,11 +2404,13 @@ func (db *DB) CreateDMChannel(user1ID, user2ID int64, isEncrypted bool) (int64, 
 		dmName = fmt.Sprintf("dm_%d_%d", user2ID, user1ID)
 	}
 
+	now := nowMillis()
+
 	// Create the DM channel (private, is_dm=true)
 	result, err := tx.Exec(`
 		INSERT INTO Channel (name, display_name, channel_type, message_retention_hours, is_private, is_dm, created_at)
 		VALUES (?, ?, 0, 168, 1, 1, ?)
-	`, dmName, "Direct Message", nowMillis())
+	`, dmName, "Direct Message", now)
 	if err != nil {
 		return 0, fmt.Errorf("failed to create DM channel: %w", err)
 	}
@@ -2419,7 +2421,6 @@ func (db *DB) CreateDMChannel(user1ID, user2ID int64, isEncrypted bool) (int64, 
 	}
 
 	// Add both users to ChannelAccess
-	now := nowMillis()
 	_, err = tx.Exec(`
 		INSERT INTO ChannelAccess (channel_id, user_id, created_at) VALUES (?, ?, ?)
 	`, channelID, user1ID, now)
@@ -2432,6 +2433,28 @@ func (db *DB) CreateDMChannel(user1ID, user2ID int64, isEncrypted bool) (int64, 
 	`, channelID, user2ID, now)
 	if err != nil {
 		return 0, fmt.Errorf("failed to add user2 to channel access: %w", err)
+	}
+
+	// Look up nicknames for participants
+	var nick1, nick2 string
+	_ = tx.QueryRow(`SELECT nickname FROM User WHERE id = ?`, user1ID).Scan(&nick1)
+	_ = tx.QueryRow(`SELECT nickname FROM User WHERE id = ?`, user2ID).Scan(&nick2)
+
+	// Add both users as ChannelParticipants (required for JoinChannel access checks)
+	_, err = tx.Exec(`
+		INSERT INTO ChannelParticipant (channel_id, user_id, nickname, joined_at)
+		VALUES (?, ?, ?, ?)
+	`, channelID, user1ID, nick1, now)
+	if err != nil {
+		return 0, fmt.Errorf("failed to add participant 1: %w", err)
+	}
+
+	_, err = tx.Exec(`
+		INSERT INTO ChannelParticipant (channel_id, user_id, nickname, joined_at)
+		VALUES (?, ?, ?, ?)
+	`, channelID, user2ID, nick2, now)
+	if err != nil {
+		return 0, fmt.Errorf("failed to add participant 2: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
