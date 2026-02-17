@@ -21,7 +21,10 @@ export enum ModalState {
   Compose = 'compose',
   Help = 'help',
   ServerSelector = 'server-selector',
-  ConfirmDelete = 'confirm-delete'
+  ConfirmDelete = 'confirm-delete',
+  StartDM = 'start-dm',
+  DMRequest = 'dm-request',
+  EncryptionSetup = 'encryption-setup'
 }
 
 // Interface for querying application state

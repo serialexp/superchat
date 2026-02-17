@@ -3,8 +3,29 @@
 // Listens to all protocol events and updates store accordingly
 
 import { SuperChatEventClient, type SuperChatEvent } from './superchat-events'
-import { store, storeActions } from '../store/app-store'
+import { store, storeActions, ModalState } from '../store/app-store'
 import { rebuildIndexes, addMessageToIndexes } from './message-indexer'
+import { computeSharedSecret, deriveChannelKey, decryptMessage, KEY_TYPE_GENERATED } from './crypto'
+import type { ChannelCreated, MessageEdited, MessageDeleted, ChannelDeleted, ServerPresence, ChannelPresence, KeyRequired, DMReady, DMPending, DMRequest, DMParticipantLeft, DMDeclined, NewMessage, Message } from '../SuperChatCodec'
+
+/**
+ * Try to decrypt a message's content_raw using the channel's encryption key.
+ * Returns the decrypted string, or the original content if decryption fails/not applicable.
+ */
+async function tryDecryptMessage(message: { content: string; content_raw?: Uint8Array; channel_id: bigint }): Promise<string> {
+  const key = store.dmChannelKeys.get(message.channel_id)
+  if (!key || !message.content_raw || message.content_raw.length === 0) {
+    return message.content
+  }
+
+  try {
+    const plaintext = await decryptMessage(key, message.content_raw)
+    return new TextDecoder().decode(plaintext)
+  } catch {
+    // Not encrypted or decryption failed - return original
+    return message.content
+  }
+}
 
 /**
  * ProtocolBridge class
@@ -88,12 +109,59 @@ export class ProtocolBridge {
         this.handleProtocolError(event.error)
         break
 
+      case 'channel-created':
+        this.handleChannelCreated(event.data)
+        break
+
+      case 'message-edited':
+        this.handleMessageEdited(event.data)
+        break
+
+      case 'message-deleted':
+        this.handleMessageDeleted(event.data)
+        break
+
+      case 'channel-deleted':
+        this.handleChannelDeleted(event.data)
+        break
+
+      case 'server-presence':
+        this.handleServerPresence(event.data)
+        break
+
+      case 'channel-presence':
+        this.handleChannelPresence(event.data)
+        break
+
+      case 'key-required':
+        this.handleKeyRequired(event.data)
+        break
+
+      case 'dm-ready':
+        this.handleDMReady(event.data)
+        break
+
+      case 'dm-pending':
+        this.handleDMPending(event.data)
+        break
+
+      case 'dm-request':
+        this.handleDMRequest(event.data)
+        break
+
+      case 'dm-participant-left':
+        this.handleDMParticipantLeft(event.data)
+        break
+
+      case 'dm-declined':
+        this.handleDMDeclined(event.data)
+        break
+
       case 'server-config':
         console.log('Received server config:', event.config)
         break
 
       case 'pong':
-        console.log('Received pong:', event.timestamp)
         break
 
       case 'traffic-update':
@@ -148,21 +216,24 @@ export class ProtocolBridge {
     if (response.success === 1) {
       console.log('Successfully joined channel:', response.channel_id)
       store.setActiveChannelId(response.channel_id)
-
-      // Request message list for this channel
-      // TODO: Call client.listMessages(response.channel_id, 0n, 100)
-      // For now, just log
-      console.log('TODO: Request message list for channel:', response.channel_id)
     } else {
       this.handleError(response.message)
     }
   }
 
   /**
-   * Handle MESSAGE_LIST message
+   * Handle MESSAGE_LIST message - with decryption for encrypted DM channels
    */
-  private handleMessageList(messages: any[]): void {
+  private async handleMessageList(messages: Message[]): Promise<void> {
     console.log(`Received ${messages.length} messages`)
+
+    // Decrypt messages from encrypted DM channels
+    for (const msg of messages) {
+      const decrypted = await tryDecryptMessage(msg)
+      if (decrypted !== msg.content) {
+        ;(msg as any).content = decrypted
+      }
+    }
 
     // Add all messages to store
     storeActions.addMessages(messages)
@@ -190,10 +261,22 @@ export class ProtocolBridge {
   }
 
   /**
-   * Handle NEW_MESSAGE broadcast (real-time message)
+   * Handle NEW_MESSAGE broadcast - with decryption for encrypted DM channels
    */
-  private handleNewMessage(message: any): void {
+  private async handleNewMessage(message: NewMessage): Promise<void> {
     console.log('Received new message:', message.message_id)
+
+    // Decrypt if this is from an encrypted DM channel
+    const decrypted = await tryDecryptMessage(message)
+    if (decrypted !== message.content) {
+      ;(message as any).content = decrypted
+    }
+
+    // Increment unread count for DM channels not currently active
+    const dm = store.dmChannels.get(message.channel_id)
+    if (dm && store.activeChannelId !== message.channel_id) {
+      storeActions.addDMChannel({ ...dm, unreadCount: dm.unreadCount + 1 })
+    }
 
     // Add message to store
     storeActions.addMessage(message)
@@ -215,12 +298,12 @@ export class ProtocolBridge {
     console.log('Subscription confirmed:', response)
 
     // Update subscription tracking based on type
-    if (response.subscription_type === 2) {
+    if (response.type === 2) {
       // Channel subscription
-      store.setSubscribedChannelId(response.target_id)
-    } else if (response.subscription_type === 1) {
+      store.setSubscribedChannelId(response.id)
+    } else if (response.type === 1) {
       // Thread subscription
-      store.setSubscribedThreadId(response.target_id)
+      store.setSubscribedThreadId(response.id)
     }
   }
 
@@ -230,6 +313,199 @@ export class ProtocolBridge {
   private handleProtocolError(error: any): void {
     const errorMsg = `Error ${error.error_code}: ${error.message}`
     this.handleError(errorMsg)
+  }
+
+  /**
+   * Handle CHANNEL_CREATED broadcast
+   */
+  private handleChannelCreated(data: ChannelCreated): void {
+    if (data.success !== 1 || !data.channel_id || !data.name) return
+
+    storeActions.addChannel({
+      channel_id: data.channel_id,
+      name: data.name,
+      description: data.description ?? '',
+      type: data.type ?? 0,
+      retention_hours: data.retention_hours ?? 168,
+      user_count: 0,
+      is_operator: 0,
+      has_subchannels: 0,
+      subchannel_count: 0,
+    })
+  }
+
+  /**
+   * Handle MESSAGE_EDITED broadcast
+   */
+  private handleMessageEdited(data: MessageEdited): void {
+    if (data.success !== 1 || !data.new_content || !data.edited_at) return
+
+    storeActions.updateMessageContent(data.message_id, data.new_content, data.edited_at)
+  }
+
+  /**
+   * Handle MESSAGE_DELETED broadcast
+   */
+  private handleMessageDeleted(data: MessageDeleted): void {
+    if (data.success !== 1) return
+
+    storeActions.removeMessage(data.message_id)
+
+    // Rebuild indexes after removal
+    const { threadIndex, replyIndex } = rebuildIndexes(store.messages)
+    store.setThreadIndex(threadIndex)
+    store.setReplyIndex(replyIndex)
+  }
+
+  /**
+   * Handle CHANNEL_DELETED broadcast
+   */
+  private handleChannelDeleted(data: ChannelDeleted): void {
+    if (data.success !== 1) return
+
+    storeActions.removeChannel(data.channel_id)
+  }
+
+  /**
+   * Handle SERVER_PRESENCE broadcast - update server roster
+   */
+  private handleServerPresence(data: ServerPresence): void {
+    const online = data.online === 1
+
+    storeActions.updateServerRoster({
+      sessionId: data.session_id,
+      nickname: data.nickname,
+      isRegistered: data.is_registered === 1,
+      userId: data.user_id.present === 1 ? data.user_id.value! : null,
+      userFlags: data.user_flags,
+    }, online)
+
+    // Track our own session ID: if the nickname matches ours and it's an online event
+    if (online && data.nickname === store.nickname) {
+      store.setSelfSessionId(data.session_id)
+    }
+  }
+
+  /**
+   * Handle CHANNEL_PRESENCE broadcast (user joined/left channel)
+   */
+  private handleChannelPresence(data: ChannelPresence): void {
+    console.log(`Channel presence: ${data.nickname} ${data.joined ? 'joined' : 'left'} channel ${data.channel_id}`)
+  }
+
+  /**
+   * Handle KEY_REQUIRED - server needs encryption key to proceed with DM
+   */
+  private handleKeyRequired(data: KeyRequired): void {
+    console.log(`Key required: ${data.reason}`, data.dm_channel_id)
+
+    const channelId = data.dm_channel_id.present === 1 ? data.dm_channel_id.value! : null
+    store.setPendingEncryptionChannelId(channelId)
+    store.setEncryptionSetupReason(data.reason)
+
+    // If we already have keys, provide them automatically
+    if (store.encryptionKeyPub) {
+      this.client.providePublicKey(KEY_TYPE_GENERATED, store.encryptionKeyPub, 'web-client')
+      return
+    }
+
+    // Otherwise show the encryption setup modal
+    storeActions.openModal(ModalState.EncryptionSetup)
+  }
+
+  /**
+   * Handle DM_READY - DM channel is ready to use
+   */
+  private handleDMReady(data: DMReady): void {
+    console.log(`DM ready: channel ${data.channel_id} with ${data.other_nickname} (encrypted: ${data.is_encrypted})`)
+
+    const isEncrypted = data.is_encrypted === 1
+    const otherUserId = data.other_user_id.present === 1 ? data.other_user_id.value! : null
+
+    // Create the DM channel entry
+    storeActions.addDMChannel({
+      channelId: data.channel_id,
+      otherUserId,
+      otherNickname: data.other_nickname,
+      isEncrypted,
+      otherPubKey: data.other_public_key ?? null,
+      unreadCount: 0,
+      participantLeft: false,
+    })
+
+    // Derive encryption key if encrypted
+    if (isEncrypted && data.other_public_key && store.encryptionKeyPriv) {
+      try {
+        const shared = computeSharedSecret(store.encryptionKeyPriv, data.other_public_key)
+        const channelKey = deriveChannelKey(shared, data.channel_id)
+        storeActions.setDMChannelKey(data.channel_id, channelKey)
+      } catch (err) {
+        console.error('Failed to derive DM encryption key:', err)
+      }
+    }
+
+    // Clean up pending/outgoing invites for this nickname
+    storeActions.removePendingDMInviteByNickname(data.other_nickname)
+    storeActions.removeOutgoingDMInviteByNickname(data.other_nickname)
+
+    // Close DM-related modals if open
+    if (store.activeModal === ModalState.DMRequest || store.activeModal === ModalState.EncryptionSetup) {
+      storeActions.closeModal()
+    }
+  }
+
+  /**
+   * Handle DM_PENDING - waiting for other party to accept
+   */
+  private handleDMPending(data: DMPending): void {
+    console.log(`DM pending: waiting for ${data.waiting_for_nickname} (${data.reason})`)
+
+    storeActions.addOutgoingDMInvite({
+      channelId: data.dm_channel_id,
+      toUserId: data.waiting_for_user_id.present === 1 ? data.waiting_for_user_id.value! : null,
+      toNickname: data.waiting_for_nickname,
+    })
+  }
+
+  /**
+   * Handle DM_REQUEST - incoming DM request from another user
+   */
+  private handleDMRequest(data: DMRequest): void {
+    console.log(`DM request from ${data.from_nickname} (encryption: ${data.encryption_status})`)
+
+    const invite = {
+      channelId: data.dm_channel_id,
+      fromUserId: data.from_user_id.present === 1 ? data.from_user_id.value! : null,
+      fromNickname: data.from_nickname,
+      encryptionStatus: data.encryption_status,
+    }
+
+    storeActions.addPendingDMInvite(invite)
+    store.setActiveDMInvite(invite)
+
+    // Open DMRequest modal (only if no modal is already open)
+    if (store.activeModal === ModalState.None) {
+      storeActions.openModal(ModalState.DMRequest)
+    }
+  }
+
+  /**
+   * Handle DM_PARTICIPANT_LEFT - someone permanently left a DM
+   */
+  private handleDMParticipantLeft(data: DMParticipantLeft): void {
+    console.log(`DM participant left: ${data.nickname} left DM channel ${data.dm_channel_id}`)
+
+    storeActions.markDMParticipantLeft(data.dm_channel_id)
+  }
+
+  /**
+   * Handle DM_DECLINED - DM request was declined
+   */
+  private handleDMDeclined(data: DMDeclined): void {
+    console.log(`DM declined by ${data.nickname} for DM channel ${data.dm_channel_id}`)
+
+    storeActions.removeOutgoingDMInvite(data.dm_channel_id)
+    store.setErrorMessage(`${data.nickname} declined your DM request`)
   }
 }
 

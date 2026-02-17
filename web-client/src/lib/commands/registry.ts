@@ -177,6 +177,19 @@ export const SHARED_COMMANDS: CommandDefinition[] = [
     priority: 801
   },
 
+  // === DM Commands ===
+
+  {
+    keys: ['Control+d', 'Meta+d'],
+    name: 'Start DM',
+    helpText: 'Start a direct message',
+    scope: CommandScope.Global,
+    modalStates: [ModalState.None],
+    actionId: 'start-dm',
+    isAvailable: (executor) => executor.isConnected(),
+    priority: 200
+  },
+
   // === Admin Commands ===
 
   {

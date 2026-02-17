@@ -3246,7 +3246,18 @@ func (s *Server) handleGetUnreadCounts(sess *Session, frame *protocol.Frame) err
 		sess.mu.RUnlock()
 
 		if userID == nil {
-			return s.sendError(sess, protocol.ErrCodeAuthRequired, "Anonymous users must provide since_timestamp")
+			// Anonymous user with no timestamp — return all zeros
+			counts := make([]protocol.UnreadCount, len(msg.Targets))
+			for i, target := range msg.Targets {
+				counts[i] = protocol.UnreadCount{
+					ChannelID:    target.ChannelID,
+					SubchannelID: target.SubchannelID,
+					ThreadID:     target.ThreadID,
+					UnreadCount:  0,
+				}
+			}
+			resp := &protocol.UnreadCountsMessage{Counts: counts}
+			return s.sendMessage(sess, protocol.TypeUnreadCounts, resp)
 		}
 	}
 

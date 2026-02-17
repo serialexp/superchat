@@ -21,7 +21,10 @@ export enum ModalState {
   Compose = 'compose',
   Help = 'help',
   ServerSelector = 'server-selector',
-  ConfirmDelete = 'confirm-delete'
+  ConfirmDelete = 'confirm-delete',
+  StartDM = 'start-dm',
+  DMRequest = 'dm-request',
+  EncryptionSetup = 'encryption-setup'
 }
 
 // Focus area for keyboard navigation
@@ -35,6 +38,41 @@ export interface ComposeState {
   content: string
   replyToId: bigint | null
   replyToMessage: Message | null
+}
+
+// DM channel info
+export interface DMChannel {
+  channelId: bigint
+  otherUserId: bigint | null
+  otherNickname: string
+  isEncrypted: boolean
+  otherPubKey: Uint8Array | null
+  unreadCount: number
+  participantLeft: boolean
+}
+
+// Incoming DM invite
+export interface DMInvite {
+  channelId: bigint
+  fromUserId: bigint | null
+  fromNickname: string
+  encryptionStatus: number
+}
+
+// Outgoing DM invite (waiting for acceptance)
+export interface OutgoingDMInvite {
+  channelId: bigint
+  toUserId: bigint | null
+  toNickname: string
+}
+
+// Presence entry for server roster
+export interface PresenceEntry {
+  sessionId: bigint
+  nickname: string
+  isRegistered: boolean
+  userId: bigint | null
+  userFlags: number
 }
 
 // Traffic statistics
@@ -133,6 +171,19 @@ const [traffic, setTraffic] = createSignal<TrafficStats>({
 const [servers, setServers] = createSignal<AppStore['servers']>([])
 const [selectedServerIndex, setSelectedServerIndex] = createSignal<number>(-1)
 
+// DM state
+const [dmChannels, setDmChannels] = createSignal<Map<bigint, DMChannel>>(new Map())
+const [pendingDMInvites, setPendingDMInvites] = createSignal<Map<bigint, DMInvite>>(new Map())
+const [outgoingDMInvites, setOutgoingDMInvites] = createSignal<Map<bigint, OutgoingDMInvite>>(new Map())
+const [dmChannelKeys, setDmChannelKeys] = createSignal<Map<bigint, Uint8Array>>(new Map())
+const [encryptionKeyPub, setEncryptionKeyPub] = createSignal<Uint8Array | null>(null)
+const [encryptionKeyPriv, setEncryptionKeyPriv] = createSignal<Uint8Array | null>(null)
+const [serverRoster, setServerRoster] = createSignal<Map<bigint, PresenceEntry>>(new Map())
+const [selfSessionId, setSelfSessionId] = createSignal<bigint | null>(null)
+const [activeDMInvite, setActiveDMInvite] = createSignal<DMInvite | null>(null)
+const [pendingEncryptionChannelId, setPendingEncryptionChannelId] = createSignal<bigint | null>(null)
+const [encryptionSetupReason, setEncryptionSetupReason] = createSignal<string>('')
+
 // Export the store as an object with getters and setters
 export const store = {
   // Connection state
@@ -209,6 +260,40 @@ export const store = {
 
   get selectedServerIndex() { return selectedServerIndex() },
   setSelectedServerIndex,
+
+  // DM state
+  get dmChannels() { return dmChannels() },
+  setDmChannels,
+
+  get pendingDMInvites() { return pendingDMInvites() },
+  setPendingDMInvites,
+
+  get outgoingDMInvites() { return outgoingDMInvites() },
+  setOutgoingDMInvites,
+
+  get dmChannelKeys() { return dmChannelKeys() },
+  setDmChannelKeys,
+
+  get encryptionKeyPub() { return encryptionKeyPub() },
+  setEncryptionKeyPub,
+
+  get encryptionKeyPriv() { return encryptionKeyPriv() },
+  setEncryptionKeyPriv,
+
+  get serverRoster() { return serverRoster() },
+  setServerRoster,
+
+  get selfSessionId() { return selfSessionId() },
+  setSelfSessionId,
+
+  get activeDMInvite() { return activeDMInvite() },
+  setActiveDMInvite,
+
+  get pendingEncryptionChannelId() { return pendingEncryptionChannelId() },
+  setPendingEncryptionChannelId,
+
+  get encryptionSetupReason() { return encryptionSetupReason() },
+  setEncryptionSetupReason,
 }
 
 // Helper actions for common operations
@@ -294,6 +379,7 @@ export const storeActions = {
     setSelectedMessageIndex(0)
     this.clearMessages()
     this.clearCompose()
+    this.clearDMState()
   },
 
   // Open/close modals
@@ -305,8 +391,153 @@ export const storeActions = {
     setActiveModal(ModalState.None)
   },
 
+  // Update a message's content and edited_at timestamp (for MESSAGE_EDITED broadcast)
+  updateMessageContent(messageId: bigint, content: string, editedAt: bigint) {
+    setMessages(prev => {
+      const existing = prev.get(messageId)
+      if (!existing) return prev
+      const newMap = new Map(prev)
+      newMap.set(messageId, {
+        ...existing,
+        content,
+        edited_at: { present: 1, value: editedAt }
+      })
+      return newMap
+    })
+  },
+
+  // Remove a message from the store (for MESSAGE_DELETED broadcast)
+  removeMessage(messageId: bigint) {
+    setMessages(prev => {
+      if (!prev.has(messageId)) return prev
+      const newMap = new Map(prev)
+      newMap.delete(messageId)
+      return newMap
+    })
+  },
+
+  // Remove a channel from the store (for CHANNEL_DELETED broadcast)
+  removeChannel(channelId: bigint) {
+    setChannels(prev => {
+      if (!prev.has(channelId)) return prev
+      const newMap = new Map(prev)
+      newMap.delete(channelId)
+      return newMap
+    })
+
+    // If the deleted channel is the active one, reset to channel list
+    if (activeChannelId() === channelId) {
+      setActiveChannelId(null)
+      setCurrentView(ViewState.ThreadList)
+      setActiveThreadId(null)
+    }
+  },
+
   // Toggle focus between sidebar and content
   toggleFocus() {
     setFocusArea(prev => prev === FocusArea.Sidebar ? FocusArea.Content : FocusArea.Sidebar)
+  },
+
+  // DM actions
+  addDMChannel(dm: DMChannel) {
+    setDmChannels(prev => new Map(prev).set(dm.channelId, dm))
+  },
+
+  removeDMChannel(channelId: bigint) {
+    setDmChannels(prev => {
+      const next = new Map(prev)
+      next.delete(channelId)
+      return next
+    })
+  },
+
+  markDMParticipantLeft(channelId: bigint) {
+    setDmChannels(prev => {
+      const existing = prev.get(channelId)
+      if (!existing) return prev
+      const next = new Map(prev)
+      next.set(channelId, { ...existing, participantLeft: true })
+      return next
+    })
+  },
+
+  addPendingDMInvite(invite: DMInvite) {
+    setPendingDMInvites(prev => new Map(prev).set(invite.channelId, invite))
+  },
+
+  removePendingDMInvite(channelId: bigint) {
+    setPendingDMInvites(prev => {
+      const next = new Map(prev)
+      next.delete(channelId)
+      return next
+    })
+  },
+
+  removePendingDMInviteByNickname(nickname: string) {
+    setPendingDMInvites(prev => {
+      const next = new Map(prev)
+      for (const [id, invite] of next) {
+        if (invite.fromNickname === nickname) next.delete(id)
+      }
+      return next
+    })
+  },
+
+  addOutgoingDMInvite(invite: OutgoingDMInvite) {
+    setOutgoingDMInvites(prev => new Map(prev).set(invite.channelId, invite))
+  },
+
+  removeOutgoingDMInvite(channelId: bigint) {
+    setOutgoingDMInvites(prev => {
+      const next = new Map(prev)
+      next.delete(channelId)
+      return next
+    })
+  },
+
+  removeOutgoingDMInviteByNickname(nickname: string) {
+    setOutgoingDMInvites(prev => {
+      const next = new Map(prev)
+      for (const [id, invite] of next) {
+        if (invite.toNickname === nickname) next.delete(id)
+      }
+      return next
+    })
+  },
+
+  setDMChannelKey(channelId: bigint, key: Uint8Array) {
+    setDmChannelKeys(prev => new Map(prev).set(channelId, key))
+  },
+
+  removeDMChannelKey(channelId: bigint) {
+    setDmChannelKeys(prev => {
+      const next = new Map(prev)
+      next.delete(channelId)
+      return next
+    })
+  },
+
+  updateServerRoster(entry: PresenceEntry, online: boolean) {
+    if (online) {
+      setServerRoster(prev => new Map(prev).set(entry.sessionId, entry))
+    } else {
+      setServerRoster(prev => {
+        const next = new Map(prev)
+        next.delete(entry.sessionId)
+        return next
+      })
+    }
+  },
+
+  clearDMState() {
+    setDmChannels(new Map())
+    setPendingDMInvites(new Map())
+    setOutgoingDMInvites(new Map())
+    setDmChannelKeys(new Map())
+    setServerRoster(new Map())
+    setSelfSessionId(null)
+    setActiveDMInvite(null)
+    setPendingEncryptionChannelId(null)
+    setEncryptionSetupReason('')
   }
 }

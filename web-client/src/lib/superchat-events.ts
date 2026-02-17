@@ -12,7 +12,19 @@ import type {
   NewMessage,
   SubscribeOk,
   Error_,
-  ServerConfig
+  ServerConfig,
+  ChannelCreated,
+  MessageEdited,
+  MessageDeleted,
+  ChannelDeleted,
+  ServerPresence,
+  ChannelPresence,
+  KeyRequired,
+  DMReady,
+  DMPending,
+  DMRequest,
+  DMParticipantLeft,
+  DMDeclined
 } from '../SuperChatCodec'
 
 // Event types for all protocol messages
@@ -28,6 +40,18 @@ export type SuperChatEvent =
   | { type: 'new-message', message: NewMessage }
   | { type: 'subscribe-ok', response: SubscribeOk }
   | { type: 'protocol-error', error: Error_ }
+  | { type: 'channel-created', data: ChannelCreated }
+  | { type: 'message-edited', data: MessageEdited }
+  | { type: 'message-deleted', data: MessageDeleted }
+  | { type: 'channel-deleted', data: ChannelDeleted }
+  | { type: 'server-presence', data: ServerPresence }
+  | { type: 'channel-presence', data: ChannelPresence }
+  | { type: 'key-required', data: KeyRequired }
+  | { type: 'dm-ready', data: DMReady }
+  | { type: 'dm-pending', data: DMPending }
+  | { type: 'dm-request', data: DMRequest }
+  | { type: 'dm-participant-left', data: DMParticipantLeft }
+  | { type: 'dm-declined', data: DMDeclined }
   | { type: 'pong', timestamp: bigint }
   | { type: 'traffic-update', sent: number, received: number }
 
@@ -70,6 +94,42 @@ export class SuperChatEventClient {
       },
       onProtocolError: (error) => {
         this.emit({ type: 'protocol-error', error })
+      },
+      onChannelCreated: (data) => {
+        this.emit({ type: 'channel-created', data })
+      },
+      onMessageEdited: (data) => {
+        this.emit({ type: 'message-edited', data })
+      },
+      onMessageDeleted: (data) => {
+        this.emit({ type: 'message-deleted', data })
+      },
+      onChannelDeleted: (data) => {
+        this.emit({ type: 'channel-deleted', data })
+      },
+      onServerPresence: (data) => {
+        this.emit({ type: 'server-presence', data })
+      },
+      onChannelPresence: (data) => {
+        this.emit({ type: 'channel-presence', data })
+      },
+      onKeyRequired: (data) => {
+        this.emit({ type: 'key-required', data })
+      },
+      onDMReady: (data) => {
+        this.emit({ type: 'dm-ready', data })
+      },
+      onDMPending: (data) => {
+        this.emit({ type: 'dm-pending', data })
+      },
+      onDMRequest: (data) => {
+        this.emit({ type: 'dm-request', data })
+      },
+      onDMParticipantLeft: (data) => {
+        this.emit({ type: 'dm-participant-left', data })
+      },
+      onDMDeclined: (data) => {
+        this.emit({ type: 'dm-declined', data })
       },
       onTrafficUpdate: (bytesSent, bytesReceived) => {
         this.emit({ type: 'traffic-update', sent: bytesSent, received: bytesReceived })
@@ -186,6 +246,48 @@ export class SuperChatEventClient {
   unsubscribeThread(messageId: bigint): void {
     this.client.unsubscribeThread(messageId)
   }
+
+  /**
+   * Start a DM with another user
+   */
+  startDM(targetType: number, targetId: bigint | null, targetNickname: string | null, allowUnencrypted: boolean): void {
+    this.client.startDM(targetType, targetId, targetNickname, allowUnencrypted)
+  }
+
+  /**
+   * Accept an unencrypted DM
+   */
+  allowUnencryptedDM(dmChannelId: bigint, permanent: boolean): void {
+    this.client.allowUnencryptedDM(dmChannelId, permanent)
+  }
+
+  /**
+   * Decline a DM request
+   */
+  declineDM(dmChannelId: bigint): void {
+    this.client.declineDM(dmChannelId)
+  }
+
+  /**
+   * Provide X25519 public key for encryption
+   */
+  providePublicKey(keyType: number, publicKey: Uint8Array, label: string): void {
+    this.client.providePublicKey(keyType, publicKey, label)
+  }
+
+  /**
+   * Post a message with raw binary content (for encrypted messages)
+   */
+  postMessageRaw(channelId: bigint, contentRaw: Uint8Array, parentId: bigint | null = null): void {
+    this.client.postMessageRaw(channelId, contentRaw, parentId)
+  }
+
+  /**
+   * Leave a channel (with optional permanent flag for DMs)
+   */
+  leaveChannel(channelId: bigint, permanent: boolean = false): void {
+    this.client.leaveChannel(channelId, permanent)
+  }
 }
 
 /**
@@ -215,5 +317,17 @@ export const onMessagePosted = createEventFilter('message-posted')
 export const onNewMessage = createEventFilter('new-message')
 export const onSubscribeOk = createEventFilter('subscribe-ok')
 export const onProtocolError = createEventFilter('protocol-error')
+export const onChannelCreated = createEventFilter('channel-created')
+export const onMessageEdited = createEventFilter('message-edited')
+export const onMessageDeleted = createEventFilter('message-deleted')
+export const onChannelDeleted = createEventFilter('channel-deleted')
+export const onServerPresence = createEventFilter('server-presence')
+export const onChannelPresence = createEventFilter('channel-presence')
+export const onKeyRequired = createEventFilter('key-required')
+export const onDMReady = createEventFilter('dm-ready')
+export const onDMPending = createEventFilter('dm-pending')
+export const onDMRequest = createEventFilter('dm-request')
+export const onDMParticipantLeft = createEventFilter('dm-participant-left')
+export const onDMDeclined = createEventFilter('dm-declined')
 export const onPong = createEventFilter('pong')
 export const onTrafficUpdate = createEventFilter('traffic-update')

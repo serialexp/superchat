@@ -15,6 +15,23 @@ import {
   Error_Decoder,
   ServerConfigDecoder,
   PingEncoder,
+  ChannelCreatedDecoder,
+  MessageEditedDecoder,
+  MessageDeletedDecoder,
+  ChannelDeletedDecoder,
+  ServerPresenceDecoder,
+  ChannelPresenceDecoder,
+  StartDMEncoder,
+  AllowUnencryptedEncoder,
+  DeclineDMEncoder,
+  ProvidePublicKeyEncoder,
+  LeaveChannelEncoder,
+  KeyRequiredDecoder,
+  DMReadyDecoder,
+  DMPendingDecoder,
+  DMRequestDecoder,
+  DMParticipantLeftDecoder,
+  DMDeclinedDecoder,
   type Channel,
   type Message,
   type NewMessage,
@@ -22,6 +39,18 @@ import {
   type SubscribeOk,
   type Error_,
   type ServerConfig,
+  type ChannelCreated,
+  type MessageEdited,
+  type MessageDeleted,
+  type ChannelDeleted,
+  type ServerPresence,
+  type ChannelPresence,
+  type KeyRequired,
+  type DMReady,
+  type DMPending,
+  type DMRequest,
+  type DMParticipantLeft,
+  type DMDeclined,
 } from '../SuperChatCodec'
 
 // Protocol message type codes
@@ -45,7 +74,23 @@ const MSG_UNSUBSCRIBE_CHANNEL = 0x54
 const MSG_SUBSCRIBE_OK = 0x99
 const MSG_ERROR = 0x91
 const MSG_SERVER_CONFIG = 0x98
+const MSG_CHANNEL_CREATED = 0x87
+const MSG_MESSAGE_EDITED = 0x8B
+const MSG_MESSAGE_DELETED = 0x8C
+const MSG_CHANNEL_DELETED = 0xAA
+const MSG_START_DM = 0x19
+const MSG_PROVIDE_PUBLIC_KEY = 0x1A
+const MSG_ALLOW_UNENCRYPTED = 0x1B
+const MSG_DECLINE_DM = 0x1E
+const MSG_LEAVE_CHANNEL = 0x06
+const MSG_KEY_REQUIRED = 0xA1
+const MSG_DM_READY = 0xA2
+const MSG_DM_PENDING = 0xA3
+const MSG_DM_REQUEST = 0xA4
 const MSG_CHANNEL_PRESENCE = 0xAC
+const MSG_SERVER_PRESENCE = 0xAD
+const MSG_DM_PARTICIPANT_LEFT = 0xAE
+const MSG_DM_DECLINED = 0xAF
 
 export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'error'
 
@@ -59,6 +104,18 @@ export interface SuperChatClientEvents {
   onSubscribeOk?: (response: SubscribeOk) => void
   onServerConfig?: (config: ServerConfig) => void
   onProtocolError?: (error: Error_) => void
+  onChannelCreated?: (data: ChannelCreated) => void
+  onMessageEdited?: (data: MessageEdited) => void
+  onMessageDeleted?: (data: MessageDeleted) => void
+  onChannelDeleted?: (data: ChannelDeleted) => void
+  onServerPresence?: (data: ServerPresence) => void
+  onChannelPresence?: (data: ChannelPresence) => void
+  onKeyRequired?: (data: KeyRequired) => void
+  onDMReady?: (data: DMReady) => void
+  onDMPending?: (data: DMPending) => void
+  onDMRequest?: (data: DMRequest) => void
+  onDMParticipantLeft?: (data: DMParticipantLeft) => void
+  onDMDeclined?: (data: DMDeclined) => void
   onTrafficUpdate?: (bytesSent: number, bytesReceived: number) => void
   onError: (error: string) => void
 }
@@ -287,9 +344,41 @@ export class SuperChatClient {
         case MSG_PONG:
           console.log('Received PONG')
           break
+        case MSG_CHANNEL_CREATED:
+          this.handleChannelCreated(payload)
+          break
+        case MSG_MESSAGE_EDITED:
+          this.handleMessageEdited(payload)
+          break
+        case MSG_MESSAGE_DELETED:
+          this.handleMessageDeleted(payload)
+          break
+        case MSG_CHANNEL_DELETED:
+          this.handleChannelDeleted(payload)
+          break
         case MSG_CHANNEL_PRESENCE:
-          // Channel presence notifications (users joining/leaving) - ignore for now
-          console.log('Received CHANNEL_PRESENCE notification')
+          this.handleChannelPresence(payload)
+          break
+        case MSG_SERVER_PRESENCE:
+          this.handleServerPresence(payload)
+          break
+        case MSG_KEY_REQUIRED:
+          this.handleKeyRequired(payload)
+          break
+        case MSG_DM_READY:
+          this.handleDMReady(payload)
+          break
+        case MSG_DM_PENDING:
+          this.handleDMPending(payload)
+          break
+        case MSG_DM_REQUEST:
+          this.handleDMRequest(payload)
+          break
+        case MSG_DM_PARTICIPANT_LEFT:
+          this.handleDMParticipantLeft(payload)
+          break
+        case MSG_DM_DECLINED:
+          this.handleDMDeclined(payload)
           break
         default:
           console.warn(`Unhandled message type: 0x${header.type.toString(16)}`)
@@ -418,6 +507,114 @@ export class SuperChatClient {
     this.events.onError(`Error ${error.error_code}: ${error.message}`)
   }
 
+  private handleChannelCreated(payload: Uint8Array) {
+    const decoder = new ChannelCreatedDecoder(payload)
+    const data = decoder.decode()
+    console.log('Channel created:', data)
+    if (this.events.onChannelCreated) {
+      this.events.onChannelCreated(data)
+    }
+  }
+
+  private handleMessageEdited(payload: Uint8Array) {
+    const decoder = new MessageEditedDecoder(payload)
+    const data = decoder.decode()
+    console.log('Message edited:', data)
+    if (this.events.onMessageEdited) {
+      this.events.onMessageEdited(data)
+    }
+  }
+
+  private handleMessageDeleted(payload: Uint8Array) {
+    const decoder = new MessageDeletedDecoder(payload)
+    const data = decoder.decode()
+    console.log('Message deleted:', data)
+    if (this.events.onMessageDeleted) {
+      this.events.onMessageDeleted(data)
+    }
+  }
+
+  private handleChannelDeleted(payload: Uint8Array) {
+    const decoder = new ChannelDeletedDecoder(payload)
+    const data = decoder.decode()
+    console.log('Channel deleted:', data)
+    if (this.events.onChannelDeleted) {
+      this.events.onChannelDeleted(data)
+    }
+  }
+
+  private handleServerPresence(payload: Uint8Array) {
+    const decoder = new ServerPresenceDecoder(payload)
+    const data = decoder.decode()
+    console.log('Server presence:', data)
+    if (this.events.onServerPresence) {
+      this.events.onServerPresence(data)
+    }
+  }
+
+  private handleChannelPresence(payload: Uint8Array) {
+    const decoder = new ChannelPresenceDecoder(payload)
+    const data = decoder.decode()
+    console.log('Channel presence:', data)
+    if (this.events.onChannelPresence) {
+      this.events.onChannelPresence(data)
+    }
+  }
+
+  private handleKeyRequired(payload: Uint8Array) {
+    const decoder = new KeyRequiredDecoder(payload)
+    const data = decoder.decode()
+    console.log('Key required:', data)
+    if (this.events.onKeyRequired) {
+      this.events.onKeyRequired(data)
+    }
+  }
+
+  private handleDMReady(payload: Uint8Array) {
+    const decoder = new DMReadyDecoder(payload)
+    const data = decoder.decode()
+    console.log('DM ready:', data)
+    if (this.events.onDMReady) {
+      this.events.onDMReady(data)
+    }
+  }
+
+  private handleDMPending(payload: Uint8Array) {
+    const decoder = new DMPendingDecoder(payload)
+    const data = decoder.decode()
+    console.log('DM pending:', data)
+    if (this.events.onDMPending) {
+      this.events.onDMPending(data)
+    }
+  }
+
+  private handleDMRequest(payload: Uint8Array) {
+    const decoder = new DMRequestDecoder(payload)
+    const data = decoder.decode()
+    console.log('DM request:', data)
+    if (this.events.onDMRequest) {
+      this.events.onDMRequest(data)
+    }
+  }
+
+  private handleDMParticipantLeft(payload: Uint8Array) {
+    const decoder = new DMParticipantLeftDecoder(payload)
+    const data = decoder.decode()
+    console.log('DM participant left:', data)
+    if (this.events.onDMParticipantLeft) {
+      this.events.onDMParticipantLeft(data)
+    }
+  }
+
+  private handleDMDeclined(payload: Uint8Array) {
+    const decoder = new DMDeclinedDecoder(payload)
+    const data = decoder.decode()
+    console.log('DM declined:', data)
+    if (this.events.onDMDeclined) {
+      this.events.onDMDeclined(data)
+    }
+  }
+
   // Public API methods
 
   listMessages(channelId: bigint, fromMessageId: bigint, limit: number) {
@@ -485,5 +682,59 @@ export class SuperChatClient {
     const encoder = new UnsubscribeThreadEncoder()
     const payload = encoder.encode({ thread_id: messageId })
     this.sendFrame(MSG_UNSUBSCRIBE_THREAD, payload)
+  }
+
+  startDM(targetType: number, targetId: bigint | null, targetNickname: string | null, allowUnencrypted: boolean) {
+    const encoder = new StartDMEncoder()
+    const payload = encoder.encode({
+      target_type: targetType,
+      target_user_id: targetId ?? undefined,
+      target_nickname: targetNickname ?? undefined,
+      allow_unencrypted: allowUnencrypted ? 1 : 0,
+    })
+    this.sendFrame(MSG_START_DM, payload)
+  }
+
+  allowUnencryptedDM(dmChannelId: bigint, permanent: boolean) {
+    const encoder = new AllowUnencryptedEncoder()
+    const payload = encoder.encode({
+      dm_channel_id: dmChannelId,
+      permanent: permanent ? 1 : 0,
+    })
+    this.sendFrame(MSG_ALLOW_UNENCRYPTED, payload)
+  }
+
+  declineDM(dmChannelId: bigint) {
+    const encoder = new DeclineDMEncoder()
+    const payload = encoder.encode({ dm_channel_id: dmChannelId })
+    this.sendFrame(MSG_DECLINE_DM, payload)
+  }
+
+  providePublicKey(keyType: number, publicKey: Uint8Array, label: string) {
+    const encoder = new ProvidePublicKeyEncoder()
+    const payload = encoder.encode({ key_type: keyType, public_key: publicKey, label })
+    this.sendFrame(MSG_PROVIDE_PUBLIC_KEY, payload)
+  }
+
+  postMessageRaw(channelId: bigint, contentRaw: Uint8Array, parentId: bigint | null = null) {
+    const encoder = new PostMessageEncoder()
+    const payload = encoder.encode({
+      channel_id: channelId,
+      subchannel_id: { present: 0 },
+      parent_id: parentId !== null ? { present: 1, value: parentId } : { present: 0 },
+      content: '',
+      content_raw: contentRaw
+    })
+    this.sendFrame(MSG_POST_MESSAGE, payload)
+  }
+
+  leaveChannel(channelId: bigint, permanent: boolean) {
+    const encoder = new LeaveChannelEncoder()
+    const payload = encoder.encode({
+      channel_id: channelId,
+      subchannel_id: { present: 0 },
+      permanent: permanent ? 1 : 0
+    })
+    this.sendFrame(MSG_LEAVE_CHANNEL, payload)
   }
 }

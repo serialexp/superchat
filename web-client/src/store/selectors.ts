@@ -4,14 +4,37 @@
 import { createMemo } from 'solid-js'
 import { store } from './app-store'
 import type { Channel, Message } from '../SuperChatCodec'
+import type { DMChannel, PresenceEntry } from './app-store'
 
 /**
  * Get the currently active channel (or null if none selected)
+ * Also covers DM channels by synthesizing a Channel object from DMChannel data
  */
 export const currentChannel = createMemo<Channel | null>(() => {
   const channelId = store.activeChannelId
   if (channelId === null) return null
-  return store.channels.get(channelId) || null
+
+  // Check regular channels first
+  const channel = store.channels.get(channelId)
+  if (channel) return channel
+
+  // Fall back to DM channels (synthesize a Channel-shaped object)
+  const dm = store.dmChannels.get(channelId)
+  if (dm) {
+    return {
+      channel_id: dm.channelId,
+      name: `DM: ${dm.otherNickname}`,
+      description: '',
+      type: 0, // DM channels behave like chat channels
+      retention_hours: 0,
+      user_count: 2,
+      is_operator: 0,
+      has_subchannels: 0,
+      subchannel_count: 0,
+    }
+  }
+
+  return null
 })
 
 /**
@@ -212,6 +235,51 @@ export const replyTargetMessage = createMemo<Message | null>(() => {
 })
 
 /**
+ * Get DM channels as a sorted array
+ */
+export const dmChannelsArray = createMemo<DMChannel[]>(() => {
+  return Array.from(store.dmChannels.values())
+    .sort((a, b) => a.otherNickname.localeCompare(b.otherNickname))
+})
+
+/**
+ * Check if the current channel is a DM channel
+ */
+export const isCurrentChannelDM = createMemo<boolean>(() => {
+  const channelId = store.activeChannelId
+  if (channelId === null) return false
+  return store.dmChannels.has(channelId)
+})
+
+/**
+ * Get the current DM channel info (or null)
+ */
+export const currentDMChannel = createMemo<DMChannel | null>(() => {
+  const channelId = store.activeChannelId
+  if (channelId === null) return null
+  return store.dmChannels.get(channelId) ?? null
+})
+
+/**
+ * Check if the current channel is encrypted
+ */
+export const isCurrentChannelEncrypted = createMemo<boolean>(() => {
+  const dm = currentDMChannel()
+  if (!dm) return false
+  return dm.isEncrypted
+})
+
+/**
+ * Get online users available for DM (excludes self, sorted by nickname)
+ */
+export const onlineUsersForDM = createMemo<PresenceEntry[]>(() => {
+  const selfId = store.selfSessionId
+  return Array.from(store.serverRoster.values())
+    .filter(entry => entry.sessionId !== selfId)
+    .sort((a, b) => a.nickname.localeCompare(b.nickname))
+})
+
+/**
  * Export a convenience object with all selectors
  */
 export const selectors = {
@@ -231,6 +299,11 @@ export const selectors = {
   composePlaceholder,
   replyTargetMessage,
   getReplyCount,
+  dmChannelsArray,
+  isCurrentChannelDM,
+  currentDMChannel,
+  isCurrentChannelEncrypted,
+  onlineUsersForDM,
 }
 
 export default selectors

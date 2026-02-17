@@ -7,7 +7,11 @@ import ThreadList from './components/ThreadList'
 import ThreadDetail from './components/ThreadDetail'
 import ServerSelector from './components/ServerSelector'
 import ComposeModal from './components/ComposeModal'
+import StartDMModal from './components/StartDMModal'
+import DMRequestModal from './components/DMRequestModal'
+import EncryptionSetupModal from './components/EncryptionSetupModal'
 import type { Message } from './SuperChatCodec'
+import { encryptMessage } from './lib/crypto'
 import {
   CommandExecutor,
   ViewState as CmdViewState,
@@ -39,7 +43,9 @@ const App: Component = () => {
   const isCurrentChannelChat = selectors.isCurrentChannelChat
   const isCurrentChannelForum = selectors.isCurrentChannelForum
   const formattedTrafficStats = selectors.formattedTrafficStats
-
+  const dmChannels = selectors.dmChannelsArray
+  const isCurrentChannelDM = selectors.isCurrentChannelDM
+  const currentDMChannel = selectors.currentDMChannel
   // Flatten thread messages for keyboard navigation (root + all nested replies in display order)
   const flattenedThreadMessages = createMemo(() => {
     const thread = currentThread()
@@ -89,6 +95,9 @@ const App: Component = () => {
         case ModalState.Compose: return CmdModalState.Compose
         case ModalState.ServerSelector: return CmdModalState.ServerSelector
         case ModalState.ConfirmDelete: return CmdModalState.ConfirmDelete
+        case ModalState.StartDM: return CmdModalState.StartDM
+        case ModalState.DMRequest: return CmdModalState.DMRequest
+        case ModalState.EncryptionSetup: return CmdModalState.EncryptionSetup
         default: return CmdModalState.None
       }
     },
@@ -246,6 +255,10 @@ const App: Component = () => {
         }
         break
 
+      case 'start-dm':
+        storeActions.openModal(ModalState.StartDM)
+        break
+
       default:
         console.log('[Keyboard] Unhandled command:', actionId)
     }
@@ -330,6 +343,22 @@ const App: Component = () => {
     store.setServerUrl(url)
     store.setNickname(nickname)
     storeActions.updateTraffic({ throttleBytesPerSecond: throttleBps })
+
+    // Restore encryption keys from localStorage
+    try {
+      const pubB64 = localStorage.getItem('superchat-encryption-pub')
+      const privB64 = localStorage.getItem('superchat-encryption-priv')
+      if (pubB64 && privB64) {
+        const pub = new Uint8Array(atob(pubB64).split('').map(c => c.charCodeAt(0)))
+        const priv = new Uint8Array(atob(privB64).split('').map(c => c.charCodeAt(0)))
+        if (pub.length === 32 && priv.length === 32) {
+          store.setEncryptionKeyPub(pub)
+          store.setEncryptionKeyPriv(priv)
+          console.log('Restored encryption keys from localStorage')
+        }
+      }
+    } catch { /* localStorage not available */ }
+
     client.connect(url, nickname)
   }
 
@@ -390,14 +419,20 @@ const App: Component = () => {
     })
   }
 
-  const handleComposeSend = (content: string) => {
+  const handleComposeSend = async (content: string) => {
     if (!currentChannel()) return
 
-    client.postMessage(
-      currentChannel()!.channel_id,
-      content,
-      store.compose.replyToId
-    )
+    const channelId = currentChannel()!.channel_id
+    const key = store.dmChannelKeys.get(channelId)
+
+    if (key) {
+      // Encrypted DM: encrypt and send raw bytes
+      const plaintext = new TextEncoder().encode(content)
+      const encrypted = await encryptMessage(key, plaintext)
+      client.postMessageRaw(channelId, encrypted, store.compose.replyToId)
+    } else {
+      client.postMessage(channelId, content, store.compose.replyToId)
+    }
 
     storeActions.clearCompose()
     storeActions.closeModal()
@@ -409,15 +444,20 @@ const App: Component = () => {
   }
 
   // Send chat message (inline input, not modal)
-  const handleChatSend = () => {
+  const handleChatSend = async () => {
     const content = chatInput().trim()
     if (!content || !currentChannel()) return
 
-    client.postMessage(
-      currentChannel()!.channel_id,
-      content,
-      null // No reply-to for chat messages
-    )
+    const channelId = currentChannel()!.channel_id
+    const key = store.dmChannelKeys.get(channelId)
+
+    if (key) {
+      const plaintext = new TextEncoder().encode(content)
+      const encrypted = await encryptMessage(key, plaintext)
+      client.postMessageRaw(channelId, encrypted, null)
+    } else {
+      client.postMessage(channelId, content, null)
+    }
 
     setChatInput('')
   }
@@ -429,6 +469,34 @@ const App: Component = () => {
       handleChatSend()
     }
     // Escape is handled by the global keyboard handler (go-back)
+  }
+
+  const handleJoinDMChannel = (channelId: bigint) => {
+    // Clear unread count
+    const dm = store.dmChannels.get(channelId)
+    if (dm) {
+      storeActions.addDMChannel({ ...dm, unreadCount: 0 })
+    }
+
+    // Join the DM channel (treated as a regular channel join)
+    store.setCurrentView(ViewState.ChatView)
+    store.setActiveThreadId(null)
+    storeActions.clearCompose()
+    client.joinChannel(channelId)
+  }
+
+  const handleLeaveDMPermanent = (channelId: bigint) => {
+    client.leaveChannel(channelId, true)
+    storeActions.removeDMChannel(channelId)
+    storeActions.removeDMChannelKey(channelId)
+
+    // If we were viewing this DM, go back to channel list
+    if (store.activeChannelId === channelId) {
+      store.setActiveChannelId(null)
+      store.setCurrentView(ViewState.ChannelList)
+      store.setFocusArea(FocusArea.Sidebar)
+      storeActions.clearMessages()
+    }
   }
 
   return (
@@ -474,6 +542,77 @@ const App: Component = () => {
             </div>
 
             <div class="p-4 flex-1 overflow-y-auto">
+              {/* DM Channels */}
+              <Show when={dmChannels().length > 0 || Array.from(store.outgoingDMInvites.values()).length > 0 || Array.from(store.pendingDMInvites.values()).length > 0}>
+                <h3 class="font-semibold text-sm uppercase text-base-content/70 mb-2">
+                  Direct Messages
+                </h3>
+                <div class="space-y-1 mb-4">
+                  {/* Active DM channels */}
+                  <For each={dmChannels()}>
+                    {(dm) => {
+                      const isSelected = () => store.activeChannelId === dm.channelId
+                      return (
+                        <div class="flex items-center gap-1">
+                          <button
+                            onClick={() => handleJoinDMChannel(dm.channelId)}
+                            class={`btn btn-ghost btn-sm flex-1 justify-start text-left gap-1 ${
+                              isSelected() ? 'btn-active' : ''
+                            }`}
+                          >
+                            <span class="text-xs">
+                              {dm.isEncrypted ? '\u{1F512}' : '\u{2709}'}
+                            </span>
+                            <span class="truncate">{dm.otherNickname}</span>
+                            <Show when={dm.participantLeft}>
+                              <span class="badge badge-xs badge-warning">left</span>
+                            </Show>
+                            <Show when={dm.unreadCount > 0}>
+                              <span class="badge badge-xs badge-primary">{dm.unreadCount}</span>
+                            </Show>
+                          </button>
+                          <button
+                            onClick={() => handleLeaveDMPermanent(dm.channelId)}
+                            class="btn btn-ghost btn-xs opacity-50 hover:opacity-100"
+                            title="Leave DM permanently"
+                          >
+                            x
+                          </button>
+                        </div>
+                      )
+                    }}
+                  </For>
+
+                  {/* Outgoing DM invites (waiting for acceptance) */}
+                  <For each={Array.from(store.outgoingDMInvites.values())}>
+                    {(invite) => (
+                      <div class="flex items-center gap-2 px-3 py-1 text-sm text-base-content/50">
+                        <span class="loading loading-spinner loading-xs"></span>
+                        <span class="truncate">{invite.toNickname}</span>
+                        <span class="text-xs">(pending)</span>
+                      </div>
+                    )}
+                  </For>
+
+                  {/* Pending incoming DM requests */}
+                  <For each={Array.from(store.pendingDMInvites.values())}>
+                    {(invite) => (
+                      <button
+                        onClick={() => {
+                          store.setActiveDMInvite(invite)
+                          storeActions.openModal(ModalState.DMRequest)
+                        }}
+                        class="btn btn-ghost btn-sm w-full justify-start text-left gap-1 text-warning"
+                      >
+                        <span class="text-xs">!</span>
+                        <span class="truncate">{invite.fromNickname}</span>
+                        <span class="badge badge-xs badge-warning">request</span>
+                      </button>
+                    )}
+                  </For>
+                </div>
+              </Show>
+
               <h3 class="font-semibold text-sm uppercase text-base-content/70 mb-2">
                 Channels
               </h3>
@@ -539,6 +678,14 @@ const App: Component = () => {
                   <h3 class="font-bold text-lg">{currentChannel()!.name}</h3>
                   <Show when={store.subscribedChannelId === currentChannel()!.channel_id}>
                     <span class="badge badge-success badge-sm">Live</span>
+                  </Show>
+                  <Show when={isCurrentChannelDM()}>
+                    <Show when={currentDMChannel()?.isEncrypted}>
+                      <span class="badge badge-info badge-sm gap-1">{'\u{1F512}'} Encrypted</span>
+                    </Show>
+                    <Show when={currentDMChannel()?.participantLeft}>
+                      <span class="badge badge-warning badge-sm">Partner left</span>
+                    </Show>
                   </Show>
                 </div>
                 <div class="text-sm text-base-content/70">
@@ -705,6 +852,16 @@ const App: Component = () => {
                 </div>
 
                 <div>
+                  <h3 class="font-semibold text-sm text-base-content/70 mb-2">Direct Messages</h3>
+                  <div class="space-y-1">
+                    <div class="flex justify-between text-sm">
+                      <span class="font-mono text-primary">Ctrl+D</span>
+                      <span class="text-base-content/70">Start DM with user</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div>
                   <h3 class="font-semibold text-sm text-base-content/70 mb-2">General</h3>
                   <div class="space-y-1">
                     <div class="flex justify-between text-sm">
@@ -734,6 +891,11 @@ const App: Component = () => {
         onSend={handleComposeSend}
         onCancel={handleComposeCancel}
       />
+
+      {/* DM Modals (self-contained, read from store) */}
+      <StartDMModal />
+      <DMRequestModal />
+      <EncryptionSetupModal />
     </div>
   )
 }

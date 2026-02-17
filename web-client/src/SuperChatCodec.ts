@@ -322,6 +322,7 @@ export interface PostMessage {
   subchannel_id: { present: number, value?: bigint };
   parent_id: { present: number, value?: bigint };
   content: String;
+  content_raw?: Uint8Array;
 }
 
 export class PostMessageEncoder extends BitStreamEncoder {
@@ -344,7 +345,7 @@ export class PostMessageEncoder extends BitStreamEncoder {
     if (value.parent_id.present == 1 && value.parent_id.value !== undefined) {
       this.writeUint64(value.parent_id.value, "big_endian");
     }
-    const value_content_bytes = new TextEncoder().encode(value.content);
+    const value_content_bytes = value.content_raw ?? new TextEncoder().encode(value.content);
     this.writeUint16(value_content_bytes.length, "big_endian");
     for (const byte of value_content_bytes) {
       this.writeUint8(byte);
@@ -444,6 +445,7 @@ export interface NewMessage {
   author_user_id: { present: number, value?: bigint };
   author_nickname: String;
   content: String;
+  content_raw?: Uint8Array;
   created_at: bigint;
   edited_at: { present: number, value?: bigint };
   reply_count: number;
@@ -530,7 +532,9 @@ export class NewMessageDecoder extends BitStreamDecoder {
     for (let i = 0; i < content_length; i++) {
       content_bytes.push(this.readUint8());
     }
-    value.content = new TextDecoder().decode(new Uint8Array(content_bytes));
+    const content_raw = new Uint8Array(content_bytes);
+    value.content_raw = content_raw;
+    value.content = new TextDecoder().decode(content_raw);
     value.created_at = this.readInt64("big_endian");
     value.edited_at = {};
     value.edited_at.present = this.readUint8();
@@ -683,6 +687,8 @@ export interface Channel {
   is_operator: number;
   type: number;
   retention_hours: number;
+  has_subchannels: number;
+  subchannel_count: number;
 }
 
 export class ChannelEncoder extends BitStreamEncoder {
@@ -711,6 +717,8 @@ export class ChannelEncoder extends BitStreamEncoder {
     this.writeUint8(value.is_operator);
     this.writeUint8(value.type);
     this.writeUint32(value.retention_hours, "big_endian");
+    this.writeUint8(value.has_subchannels);
+    this.writeUint16(value.subchannel_count, "big_endian");
     return this.finish();
   }
 }
@@ -740,6 +748,8 @@ export class ChannelDecoder extends BitStreamDecoder {
     value.is_operator = this.readUint8();
     value.type = this.readUint8();
     value.retention_hours = this.readUint32("big_endian");
+    value.has_subchannels = this.readUint8();
+    value.subchannel_count = this.readUint16("big_endian");
     return value;
   }
 }
@@ -780,6 +790,8 @@ export class ChannelListEncoder extends BitStreamEncoder {
       this.writeUint8(value_channels_item.is_operator);
       this.writeUint8(value_channels_item.type);
       this.writeUint32(value_channels_item.retention_hours, "big_endian");
+      this.writeUint8(value_channels_item.has_subchannels);
+      this.writeUint16(value_channels_item.subchannel_count, "big_endian");
     }
     return this.finish();
   }
@@ -819,6 +831,8 @@ export class ChannelListDecoder extends BitStreamDecoder {
       channels_item.is_operator = this.readUint8();
       channels_item.type = this.readUint8();
       channels_item.retention_hours = this.readUint32("big_endian");
+      channels_item.has_subchannels = this.readUint8();
+      channels_item.subchannel_count = this.readUint16("big_endian");
       value.channels.push(channels_item);
     }
     return value;
@@ -1022,6 +1036,7 @@ export interface Message {
   author_user_id: { present: number, value?: bigint };
   author_nickname: String;
   content: String;
+  content_raw?: Uint8Array;
   created_at: bigint;
   edited_at: { present: number, value?: bigint };
   reply_count: number;
@@ -1108,7 +1123,9 @@ export class MessageDecoder extends BitStreamDecoder {
     for (let i = 0; i < content_length; i++) {
       content_bytes.push(this.readUint8());
     }
-    value.content = new TextDecoder().decode(new Uint8Array(content_bytes));
+    const content_raw = new Uint8Array(content_bytes);
+    value.content_raw = content_raw;
+    value.content = new TextDecoder().decode(content_raw);
     value.created_at = this.readInt64("big_endian");
     value.edited_at = {};
     value.edited_at.present = this.readUint8();
@@ -1244,7 +1261,9 @@ export class MessageListDecoder extends BitStreamDecoder {
       for (let i = 0; i < messages_item_content_length; i++) {
         messages_item_content_bytes.push(this.readUint8());
       }
-      messages_item.content = new TextDecoder().decode(new Uint8Array(messages_item_content_bytes));
+      const messages_item_content_raw = new Uint8Array(messages_item_content_bytes);
+      messages_item.content_raw = messages_item_content_raw;
+      messages_item.content = new TextDecoder().decode(messages_item_content_raw);
       messages_item.created_at = this.readInt64("big_endian");
       messages_item.edited_at = {};
       messages_item.edited_at.present = this.readUint8();
@@ -1648,6 +1667,596 @@ export class ServerConfigDecoder extends BitStreamDecoder {
     value.max_channel_subs = this.readUint16("big_endian");
     value.directory_enabled = this.readUint8();
     return value;
+  }
+}
+
+/**
+ * Channel creation broadcast
+ */
+export interface ChannelCreated {
+  success: number;
+  channel_id?: bigint;
+  name?: string;
+  description?: string;
+  type?: number;
+  retention_hours?: number;
+  message: string;
+}
+
+export class ChannelCreatedDecoder extends BitStreamDecoder {
+  constructor(bytes: Uint8Array | number[], private context?: any) {
+    super(bytes, "msb_first");
+  }
+
+  decode(): ChannelCreated {
+    const value: any = {};
+
+    value.success = this.readUint8();
+    if (value.success === 1) {
+      value.channel_id = this.readUint64("big_endian");
+      const name_length = this.readUint16("big_endian");
+      const name_bytes: number[] = [];
+      for (let i = 0; i < name_length; i++) {
+        name_bytes.push(this.readUint8());
+      }
+      value.name = new TextDecoder().decode(new Uint8Array(name_bytes));
+      const description_length = this.readUint16("big_endian");
+      const description_bytes: number[] = [];
+      for (let i = 0; i < description_length; i++) {
+        description_bytes.push(this.readUint8());
+      }
+      value.description = new TextDecoder().decode(new Uint8Array(description_bytes));
+      value.type = this.readUint8();
+      value.retention_hours = this.readUint32("big_endian");
+    }
+    const message_length = this.readUint16("big_endian");
+    const message_bytes: number[] = [];
+    for (let i = 0; i < message_length; i++) {
+      message_bytes.push(this.readUint8());
+    }
+    value.message = new TextDecoder().decode(new Uint8Array(message_bytes));
+    return value;
+  }
+}
+
+/**
+ * Message edited broadcast
+ */
+export interface MessageEdited {
+  success: number;
+  message_id: bigint;
+  edited_at?: bigint;
+  new_content?: string;
+  message: string;
+}
+
+export class MessageEditedDecoder extends BitStreamDecoder {
+  constructor(bytes: Uint8Array | number[], private context?: any) {
+    super(bytes, "msb_first");
+  }
+
+  decode(): MessageEdited {
+    const value: any = {};
+
+    value.success = this.readUint8();
+    value.message_id = this.readUint64("big_endian");
+    if (value.success === 1) {
+      value.edited_at = this.readInt64("big_endian");
+      const new_content_length = this.readUint16("big_endian");
+      const new_content_bytes: number[] = [];
+      for (let i = 0; i < new_content_length; i++) {
+        new_content_bytes.push(this.readUint8());
+      }
+      value.new_content = new TextDecoder().decode(new Uint8Array(new_content_bytes));
+    }
+    const message_length = this.readUint16("big_endian");
+    const message_bytes: number[] = [];
+    for (let i = 0; i < message_length; i++) {
+      message_bytes.push(this.readUint8());
+    }
+    value.message = new TextDecoder().decode(new Uint8Array(message_bytes));
+    return value;
+  }
+}
+
+/**
+ * Message deleted broadcast
+ */
+export interface MessageDeleted {
+  success: number;
+  message_id: bigint;
+  deleted_at?: bigint;
+  message: string;
+}
+
+export class MessageDeletedDecoder extends BitStreamDecoder {
+  constructor(bytes: Uint8Array | number[], private context?: any) {
+    super(bytes, "msb_first");
+  }
+
+  decode(): MessageDeleted {
+    const value: any = {};
+
+    value.success = this.readUint8();
+    value.message_id = this.readUint64("big_endian");
+    if (value.success === 1) {
+      value.deleted_at = this.readInt64("big_endian");
+    }
+    const message_length = this.readUint16("big_endian");
+    const message_bytes: number[] = [];
+    for (let i = 0; i < message_length; i++) {
+      message_bytes.push(this.readUint8());
+    }
+    value.message = new TextDecoder().decode(new Uint8Array(message_bytes));
+    return value;
+  }
+}
+
+/**
+ * Channel deleted broadcast
+ */
+export interface ChannelDeleted {
+  success: number;
+  channel_id: bigint;
+  message: string;
+}
+
+export class ChannelDeletedDecoder extends BitStreamDecoder {
+  constructor(bytes: Uint8Array | number[], private context?: any) {
+    super(bytes, "msb_first");
+  }
+
+  decode(): ChannelDeleted {
+    const value: any = {};
+
+    value.success = this.readUint8();
+    value.channel_id = this.readUint64("big_endian");
+    const message_length = this.readUint16("big_endian");
+    const message_bytes: number[] = [];
+    for (let i = 0; i < message_length; i++) {
+      message_bytes.push(this.readUint8());
+    }
+    value.message = new TextDecoder().decode(new Uint8Array(message_bytes));
+    return value;
+  }
+}
+
+/**
+ * Server-wide presence notification
+ */
+export interface ServerPresence {
+  session_id: bigint;
+  nickname: string;
+  is_registered: number;
+  user_id: { present: number, value?: bigint };
+  user_flags: number;
+  online: number;
+}
+
+export class ServerPresenceDecoder extends BitStreamDecoder {
+  constructor(bytes: Uint8Array | number[], private context?: any) {
+    super(bytes, "msb_first");
+  }
+
+  decode(): ServerPresence {
+    const value: any = {};
+
+    value.session_id = this.readUint64("big_endian");
+    const nickname_length = this.readUint16("big_endian");
+    const nickname_bytes: number[] = [];
+    for (let i = 0; i < nickname_length; i++) {
+      nickname_bytes.push(this.readUint8());
+    }
+    value.nickname = new TextDecoder().decode(new Uint8Array(nickname_bytes));
+    value.is_registered = this.readUint8();
+    value.user_id = {};
+    value.user_id.present = this.readUint8();
+    if (value.user_id.present === 1) {
+      value.user_id.value = this.readUint64("big_endian");
+    }
+    value.user_flags = this.readUint8();
+    value.online = this.readUint8();
+    return value;
+  }
+}
+
+/**
+ * Channel-specific presence notification
+ */
+export interface ChannelPresence {
+  channel_id: bigint;
+  subchannel_id: { present: number, value?: bigint };
+  session_id: bigint;
+  nickname: string;
+  is_registered: number;
+  user_id: { present: number, value?: bigint };
+  user_flags: number;
+  joined: number;
+}
+
+export class ChannelPresenceDecoder extends BitStreamDecoder {
+  constructor(bytes: Uint8Array | number[], private context?: any) {
+    super(bytes, "msb_first");
+  }
+
+  decode(): ChannelPresence {
+    const value: any = {};
+
+    value.channel_id = this.readUint64("big_endian");
+    value.subchannel_id = {};
+    value.subchannel_id.present = this.readUint8();
+    if (value.subchannel_id.present === 1) {
+      value.subchannel_id.value = this.readUint64("big_endian");
+    }
+    value.session_id = this.readUint64("big_endian");
+    const nickname_length = this.readUint16("big_endian");
+    const nickname_bytes: number[] = [];
+    for (let i = 0; i < nickname_length; i++) {
+      nickname_bytes.push(this.readUint8());
+    }
+    value.nickname = new TextDecoder().decode(new Uint8Array(nickname_bytes));
+    value.is_registered = this.readUint8();
+    value.user_id = {};
+    value.user_id.present = this.readUint8();
+    if (value.user_id.present === 1) {
+      value.user_id.value = this.readUint64("big_endian");
+    }
+    value.user_flags = this.readUint8();
+    value.joined = this.readUint8();
+    return value;
+  }
+}
+
+// ===== V3 Direct Message (DM) Messages =====
+
+/**
+ * DM target type constants
+ */
+export const DM_TARGET_BY_USER_ID = 0x00;
+export const DM_TARGET_BY_NICKNAME = 0x01;
+export const DM_TARGET_BY_SESSION_ID = 0x02;
+
+/**
+ * DM encryption status constants
+ */
+export const DM_ENCRYPTION_NOT_POSSIBLE = 0;
+export const DM_ENCRYPTION_REQUIRED = 1;
+export const DM_ENCRYPTION_OPTIONAL = 2;
+
+/**
+ * Start a DM with another user (Client → Server, 0x19)
+ */
+export interface StartDM {
+  target_type: number;
+  target_user_id?: bigint;
+  target_nickname?: string;
+  allow_unencrypted: number;
+}
+
+export class StartDMEncoder extends BitStreamEncoder {
+  constructor() {
+    super("msb_first");
+  }
+
+  encode(value: StartDM): Uint8Array {
+    this.writeUint8(value.target_type);
+    if (value.target_type === DM_TARGET_BY_USER_ID || value.target_type === DM_TARGET_BY_SESSION_ID) {
+      this.writeUint64(value.target_user_id!, "big_endian");
+    } else if (value.target_type === DM_TARGET_BY_NICKNAME) {
+      const nickname_bytes = new TextEncoder().encode(value.target_nickname!);
+      this.writeUint16(nickname_bytes.length, "big_endian");
+      for (const byte of nickname_bytes) {
+        this.writeUint8(byte);
+      }
+    }
+    this.writeUint8(value.allow_unencrypted);
+    return this.finish();
+  }
+}
+
+/**
+ * Allow unencrypted DM (Client → Server, 0x1B)
+ */
+export interface AllowUnencrypted {
+  dm_channel_id: bigint;
+  permanent: number;
+}
+
+export class AllowUnencryptedEncoder extends BitStreamEncoder {
+  constructor() {
+    super("msb_first");
+  }
+
+  encode(value: AllowUnencrypted): Uint8Array {
+    this.writeUint64(value.dm_channel_id, "big_endian");
+    this.writeUint8(value.permanent);
+    return this.finish();
+  }
+}
+
+/**
+ * Decline a DM request (Client → Server, 0x1E)
+ */
+export interface DeclineDM {
+  dm_channel_id: bigint;
+}
+
+export class DeclineDMEncoder extends BitStreamEncoder {
+  constructor() {
+    super("msb_first");
+  }
+
+  encode(value: DeclineDM): Uint8Array {
+    this.writeUint64(value.dm_channel_id, "big_endian");
+    return this.finish();
+  }
+}
+
+/**
+ * Server needs encryption key (Server → Client, 0xA1)
+ */
+export interface KeyRequired {
+  reason: string;
+  dm_channel_id: { present: number, value?: bigint };
+}
+
+export class KeyRequiredDecoder extends BitStreamDecoder {
+  constructor(bytes: Uint8Array | number[], private context?: any) {
+    super(bytes, "msb_first");
+  }
+
+  decode(): KeyRequired {
+    const value: any = {};
+
+    const reason_length = this.readUint16("big_endian");
+    const reason_bytes: number[] = [];
+    for (let i = 0; i < reason_length; i++) {
+      reason_bytes.push(this.readUint8());
+    }
+    value.reason = new TextDecoder().decode(new Uint8Array(reason_bytes));
+    value.dm_channel_id = {};
+    value.dm_channel_id.present = this.readUint8();
+    if (value.dm_channel_id.present === 1) {
+      value.dm_channel_id.value = this.readUint64("big_endian");
+    }
+    return value;
+  }
+}
+
+/**
+ * DM channel is ready (Server → Client, 0xA2)
+ */
+export interface DMReady {
+  channel_id: bigint;
+  other_user_id: { present: number, value?: bigint };
+  other_nickname: string;
+  is_encrypted: number;
+  other_public_key?: Uint8Array;
+}
+
+export class DMReadyDecoder extends BitStreamDecoder {
+  constructor(bytes: Uint8Array | number[], private context?: any) {
+    super(bytes, "msb_first");
+  }
+
+  decode(): DMReady {
+    const value: any = {};
+
+    value.channel_id = this.readUint64("big_endian");
+    value.other_user_id = {};
+    value.other_user_id.present = this.readUint8();
+    if (value.other_user_id.present === 1) {
+      value.other_user_id.value = this.readUint64("big_endian");
+    }
+    const other_nickname_length = this.readUint16("big_endian");
+    const other_nickname_bytes: number[] = [];
+    for (let i = 0; i < other_nickname_length; i++) {
+      other_nickname_bytes.push(this.readUint8());
+    }
+    value.other_nickname = new TextDecoder().decode(new Uint8Array(other_nickname_bytes));
+    value.is_encrypted = this.readUint8();
+    if (value.is_encrypted === 1) {
+      const key_bytes: number[] = [];
+      for (let i = 0; i < 32; i++) {
+        key_bytes.push(this.readUint8());
+      }
+      value.other_public_key = new Uint8Array(key_bytes);
+    }
+    return value;
+  }
+}
+
+/**
+ * DM is pending, waiting for other party (Server → Client, 0xA3)
+ */
+export interface DMPending {
+  dm_channel_id: bigint;
+  waiting_for_user_id: { present: number, value?: bigint };
+  waiting_for_nickname: string;
+  reason: string;
+}
+
+export class DMPendingDecoder extends BitStreamDecoder {
+  constructor(bytes: Uint8Array | number[], private context?: any) {
+    super(bytes, "msb_first");
+  }
+
+  decode(): DMPending {
+    const value: any = {};
+
+    value.dm_channel_id = this.readUint64("big_endian");
+    value.waiting_for_user_id = {};
+    value.waiting_for_user_id.present = this.readUint8();
+    if (value.waiting_for_user_id.present === 1) {
+      value.waiting_for_user_id.value = this.readUint64("big_endian");
+    }
+    const waiting_for_nickname_length = this.readUint16("big_endian");
+    const waiting_for_nickname_bytes: number[] = [];
+    for (let i = 0; i < waiting_for_nickname_length; i++) {
+      waiting_for_nickname_bytes.push(this.readUint8());
+    }
+    value.waiting_for_nickname = new TextDecoder().decode(new Uint8Array(waiting_for_nickname_bytes));
+    const reason_length = this.readUint16("big_endian");
+    const reason_bytes: number[] = [];
+    for (let i = 0; i < reason_length; i++) {
+      reason_bytes.push(this.readUint8());
+    }
+    value.reason = new TextDecoder().decode(new Uint8Array(reason_bytes));
+    return value;
+  }
+}
+
+/**
+ * Incoming DM request (Server → Client, 0xA4)
+ */
+export interface DMRequest {
+  dm_channel_id: bigint;
+  from_user_id: { present: number, value?: bigint };
+  from_nickname: string;
+  encryption_status: number;
+}
+
+export class DMRequestDecoder extends BitStreamDecoder {
+  constructor(bytes: Uint8Array | number[], private context?: any) {
+    super(bytes, "msb_first");
+  }
+
+  decode(): DMRequest {
+    const value: any = {};
+
+    value.dm_channel_id = this.readUint64("big_endian");
+    value.from_user_id = {};
+    value.from_user_id.present = this.readUint8();
+    if (value.from_user_id.present === 1) {
+      value.from_user_id.value = this.readUint64("big_endian");
+    }
+    const from_nickname_length = this.readUint16("big_endian");
+    const from_nickname_bytes: number[] = [];
+    for (let i = 0; i < from_nickname_length; i++) {
+      from_nickname_bytes.push(this.readUint8());
+    }
+    value.from_nickname = new TextDecoder().decode(new Uint8Array(from_nickname_bytes));
+    value.encryption_status = this.readUint8();
+    return value;
+  }
+}
+
+/**
+ * Participant left a DM (Server → Client, 0xAE)
+ */
+export interface DMParticipantLeft {
+  dm_channel_id: bigint;
+  user_id: { present: number, value?: bigint };
+  nickname: string;
+}
+
+export class DMParticipantLeftDecoder extends BitStreamDecoder {
+  constructor(bytes: Uint8Array | number[], private context?: any) {
+    super(bytes, "msb_first");
+  }
+
+  decode(): DMParticipantLeft {
+    const value: any = {};
+
+    value.dm_channel_id = this.readUint64("big_endian");
+    value.user_id = {};
+    value.user_id.present = this.readUint8();
+    if (value.user_id.present === 1) {
+      value.user_id.value = this.readUint64("big_endian");
+    }
+    const nickname_length = this.readUint16("big_endian");
+    const nickname_bytes: number[] = [];
+    for (let i = 0; i < nickname_length; i++) {
+      nickname_bytes.push(this.readUint8());
+    }
+    value.nickname = new TextDecoder().decode(new Uint8Array(nickname_bytes));
+    return value;
+  }
+}
+
+/**
+ * DM request was declined (Server → Client, 0xAF)
+ */
+export interface DMDeclined {
+  dm_channel_id: bigint;
+  user_id: { present: number, value?: bigint };
+  nickname: string;
+}
+
+export class DMDeclinedDecoder extends BitStreamDecoder {
+  constructor(bytes: Uint8Array | number[], private context?: any) {
+    super(bytes, "msb_first");
+  }
+
+  decode(): DMDeclined {
+    const value: any = {};
+
+    value.dm_channel_id = this.readUint64("big_endian");
+    value.user_id = {};
+    value.user_id.present = this.readUint8();
+    if (value.user_id.present === 1) {
+      value.user_id.value = this.readUint64("big_endian");
+    }
+    const nickname_length = this.readUint16("big_endian");
+    const nickname_bytes: number[] = [];
+    for (let i = 0; i < nickname_length; i++) {
+      nickname_bytes.push(this.readUint8());
+    }
+    value.nickname = new TextDecoder().decode(new Uint8Array(nickname_bytes));
+    return value;
+  }
+}
+
+/**
+ * Provide X25519 public key for encryption (Client → Server, 0x1A)
+ */
+export interface ProvidePublicKey {
+  key_type: number;
+  public_key: Uint8Array; // 32 bytes
+  label: string;
+}
+
+export class ProvidePublicKeyEncoder extends BitStreamEncoder {
+  constructor() {
+    super("msb_first");
+  }
+
+  encode(value: ProvidePublicKey): Uint8Array {
+    this.writeUint8(value.key_type);
+    for (const byte of value.public_key) {
+      this.writeUint8(byte);
+    }
+    const label_bytes = new TextEncoder().encode(value.label);
+    this.writeUint16(label_bytes.length, "big_endian");
+    for (const byte of label_bytes) {
+      this.writeUint8(byte);
+    }
+    return this.finish();
+  }
+}
+
+/**
+ * Leave a channel (Client → Server, 0x06)
+ */
+export interface LeaveChannel {
+  channel_id: bigint;
+  subchannel_id: { present: number, value?: bigint };
+  permanent: number;
+}
+
+export class LeaveChannelEncoder extends BitStreamEncoder {
+  constructor() {
+    super("msb_first");
+  }
+
+  encode(value: LeaveChannel): Uint8Array {
+    this.writeUint64(value.channel_id, "big_endian");
+    this.writeUint8(value.subchannel_id.present);
+    if (value.subchannel_id.present == 1 && value.subchannel_id.value !== undefined) {
+      this.writeUint64(value.subchannel_id.value, "big_endian");
+    }
+    this.writeUint8(value.permanent);
+    return this.finish();
   }
 }
 
