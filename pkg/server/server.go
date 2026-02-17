@@ -418,7 +418,7 @@ func (s *Server) notifyClientsOfShutdown() {
 	// Send to all sessions concurrently (best effort)
 	sent := 0
 	for _, sess := range sessions {
-		if err := sess.Conn.EncodeFrame(frame, sess.ProtocolVersion); err == nil {
+		if err := sess.Conn.EncodeFrame(frame, sess.GetProtocolVersion()); err == nil {
 			sent++
 		}
 	}
@@ -528,8 +528,8 @@ func (s *Server) messageLoop(sess *Session, conn net.Conn) {
 		debugLog.Printf("Session %d ← RECV: Type=0x%02X Flags=0x%02X PayloadLen=%d", sess.ID, frame.Type, frame.Flags, len(frame.Payload))
 
 		// Capture client's protocol version from frame headers (use first non-zero version seen)
-		if sess.ProtocolVersion == 0 && frame.Version > 0 {
-			sess.ProtocolVersion = frame.Version
+		if sess.GetProtocolVersion() == 0 && frame.Version > 0 {
+			sess.SetProtocolVersion(frame.Version)
 		}
 
 		// Update session activity (buffered write, rate-limited to half of session timeout)
@@ -717,7 +717,7 @@ func (s *Server) sendServerConfig(sess *Session) error {
 	if s.metrics != nil {
 		s.metrics.RecordMessageSent(messageTypeToString(protocol.TypeServerConfig))
 	}
-	return sess.Conn.EncodeFrame(frame, sess.ProtocolVersion)
+	return sess.Conn.EncodeFrame(frame, sess.GetProtocolVersion())
 }
 
 // sendError sends an ERROR message to a session
@@ -742,7 +742,7 @@ func (s *Server) sendError(sess *Session, code uint16, message string) error {
 	if s.metrics != nil {
 		s.metrics.RecordMessageSent(messageTypeToString(protocol.TypeError))
 	}
-	return sess.Conn.EncodeFrame(frame, sess.ProtocolVersion)
+	return sess.Conn.EncodeFrame(frame, sess.GetProtocolVersion())
 }
 
 // isAdmin checks if a session belongs to an admin user

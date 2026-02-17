@@ -1680,7 +1680,7 @@ func (s *Server) sendMessage(sess *Session, msgType uint8, msg interface{}) erro
 
 	// Send frame (SafeConn automatically handles write synchronization)
 	debugLog.Printf("Session %d → SEND: Type=0x%02X Flags=0x%02X PayloadLen=%d", sess.ID, msgType, 0, len(payload))
-	if err := sess.Conn.EncodeFrame(frame, sess.ProtocolVersion); err != nil {
+	if err := sess.Conn.EncodeFrame(frame, sess.GetProtocolVersion()); err != nil {
 		errorLog.Printf("Session %d: EncodeFrame failed (Type=0x%02X): %v", sess.ID, msgType, err)
 		return err
 	}
@@ -1808,7 +1808,7 @@ func (s *Server) broadcastToSessionsVersionAware(sessions []*Session, v1Bytes, v
 			for _, sess := range sessionChunk {
 				// Choose appropriate encoding based on client's protocol version
 				frameBytes := v1Bytes
-				if v2Bytes != nil && sess.ProtocolVersion >= 2 {
+				if v2Bytes != nil && sess.GetProtocolVersion() >= 2 {
 					frameBytes = v2Bytes
 				}
 

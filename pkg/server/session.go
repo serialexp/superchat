@@ -25,9 +25,9 @@ type Session struct {
 	Shadowbanned           bool         // True if user is shadowbanned (messages hidden from other users)
 	Conn                   *SafeConn    // TCP connection with automatic write synchronization
 	RemoteAddr             string       // Remote address (for rate limiting)
-	JoinedChannel          *int64       // Currently joined channel ID
-	ProtocolVersion        uint8        // Client's protocol version (from frame headers)
-	mu                     sync.RWMutex // Protects Nickname, UserFlags, Shadowbanned, and JoinedChannel
+	JoinedChannel          *int64           // Currently joined channel ID
+	protocolVersion        atomic.Uint32    // Client's protocol version (from frame headers), accessed atomically
+	mu                     sync.RWMutex    // Protects Nickname, UserFlags, Shadowbanned, and JoinedChannel
 	lastActivityUpdateTime int64        // Last time we wrote activity to DB (milliseconds, atomic)
 
 	// Subscriptions for selective message broadcasting
@@ -37,6 +37,16 @@ type Session struct {
 
 	// V3 DM encryption (for anonymous users with ephemeral keys)
 	EncryptionPublicKey []byte // X25519 public key (32 bytes, session-only for anonymous)
+}
+
+// GetProtocolVersion returns the session's protocol version atomically.
+func (s *Session) GetProtocolVersion() uint8 {
+	return uint8(s.protocolVersion.Load())
+}
+
+// SetProtocolVersion sets the session's protocol version atomically.
+func (s *Session) SetProtocolVersion(v uint8) {
+	s.protocolVersion.Store(uint32(v))
 }
 
 // SessionManager manages all active sessions
