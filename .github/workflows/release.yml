@@ -159,7 +159,7 @@ jobs:
           - os: macos-latest
             platform: darwin
             arch: universal
-            name: superchat-desktop-darwin-universal
+            name: superchat-desktop-darwin-universal.zip
           - os: windows-latest
             platform: windows
             arch: amd64
@@ -203,10 +203,15 @@ jobs:
         working-directory: superchat-desktop
         run: wails build -platform ${{ matrix.platform }}/${{ matrix.arch }}
 
-      - name: Rename binary (Linux/macOS)
-        if: matrix.platform != 'windows'
+      - name: Rename binary (Linux)
+        if: matrix.platform == 'linux'
         working-directory: superchat-desktop
         run: mv build/bin/superchat-desktop ${{ matrix.name }}
+
+      - name: Package app bundle (macOS)
+        if: matrix.platform == 'darwin'
+        working-directory: superchat-desktop/build/bin
+        run: zip -r ../../${{ matrix.name }} superchat-desktop.app
 
       - name: Rename binary (Windows)
         if: matrix.platform == 'windows'
