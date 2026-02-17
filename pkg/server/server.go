@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -21,6 +22,8 @@ import (
 	"github.com/aeolun/superchat/pkg/database"
 	"github.com/aeolun/superchat/pkg/protocol"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"golang.org/x/crypto/argon2"
+	"golang.org/x/crypto/bcrypt"
 )
 
 const (
@@ -83,7 +86,8 @@ type ServerConfig struct {
 	MaxUsers       uint32 // Max concurrent users (0 = unlimited)
 
 	// Admin configuration
-	AdminUsers []string // List of admin user nicknames
+	AdminUsers    []string // List of admin user nicknames
+	AdminPassword string   // If set, reset the first admin user's password on boot
 }
 
 // DefaultConfig returns default server configuration
@@ -131,6 +135,15 @@ func NewServer(dbPath string, config ServerConfig, configPath string) (*Server, 
 	if err != nil {
 		sqliteDB.Close()
 		return nil, fmt.Errorf("failed to create in-memory database: %w", err)
+	}
+
+	// Reset first admin user's password if configured
+	if config.AdminPassword != "" && len(config.AdminUsers) > 0 {
+		if err := resetAdminPassword(sqliteDB, config.AdminUsers[0], config.AdminPassword); err != nil {
+			log.Printf("Warning: failed to reset admin password for %s: %v", config.AdminUsers[0], err)
+		} else {
+			log.Printf("Reset password for admin user %s", config.AdminUsers[0])
+		}
 	}
 
 	// Initialize loggers
@@ -743,6 +756,29 @@ func (s *Server) sendError(sess *Session, code uint16, message string) error {
 		s.metrics.RecordMessageSent(messageTypeToString(protocol.TypeError))
 	}
 	return sess.Conn.EncodeFrame(frame, sess.GetProtocolVersion())
+}
+
+// resetAdminPassword resets an admin user's password during server startup.
+// Replicates the client-side argon2id hash (nickname as salt) then bcrypts it,
+// matching the normal registration flow.
+func resetAdminPassword(db *database.DB, nickname, plaintext string) error {
+	user, err := db.GetUserByNickname(nickname)
+	if err != nil {
+		return fmt.Errorf("user %q not found: %w", nickname, err)
+	}
+
+	// Step 1: argon2id hash (same as client does)
+	salt := []byte(nickname)
+	hash := argon2.IDKey([]byte(plaintext), salt, 3, 64*1024, 4, 32)
+	clientHash := base64.RawURLEncoding.EncodeToString(hash)
+
+	// Step 2: bcrypt the client hash (same as server does on register/login)
+	bcryptHash, err := bcrypt.GenerateFromPassword([]byte(clientHash), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("bcrypt failed: %w", err)
+	}
+
+	return db.UpdateUserPassword(user.ID, string(bcryptHash))
 }
 
 // isAdminNickname checks if a nickname is in the server's admin users config list
