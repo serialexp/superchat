@@ -1222,6 +1222,10 @@ func (m *MemDB) UpdateUserPassword(userID int64, newPasswordHash string) error {
 	return m.sqliteDB.UpdateUserPassword(userID, newPasswordHash)
 }
 
+func (m *MemDB) UpdateUserFlags(userID int64, flags uint8) error {
+	return m.sqliteDB.UpdateUserFlags(userID, flags)
+}
+
 // ===== SSH Key Methods (V2 feature) =====
 
 func (m *MemDB) CreateSSHKey(key *SSHKey) error {

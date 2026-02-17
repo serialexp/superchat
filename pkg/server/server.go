@@ -745,23 +745,21 @@ func (s *Server) sendError(sess *Session, code uint16, message string) error {
 	return sess.Conn.EncodeFrame(frame, sess.GetProtocolVersion())
 }
 
+// isAdminNickname checks if a nickname is in the server's admin users config list
+func (s *Server) isAdminNickname(nickname string) bool {
+	for _, adminNick := range s.config.AdminUsers {
+		if adminNick == nickname {
+			return true
+		}
+	}
+	return false
+}
+
 // isAdmin checks if a session belongs to an admin user
 // Returns false for anonymous users (nil UserID)
 // Returns true if session nickname matches any admin user in config
 func (s *Server) isAdmin(sess *Session) bool {
-	// Anonymous users can never be admin
-	if sess.UserID == nil {
-		return false
-	}
-
-	// Check if nickname is in admin list
-	for _, adminNick := range s.config.AdminUsers {
-		if sess.Nickname == adminNick {
-			return true
-		}
-	}
-
-	return false
+	return sess.UserID != nil && s.isAdminNickname(sess.Nickname)
 }
 
 // metricsLoggingLoop periodically logs key metrics

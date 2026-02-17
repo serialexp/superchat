@@ -250,6 +250,20 @@ func (s *Server) handleAuthRequest(sess *Session, frame *protocol.Frame) error {
 		}
 	}
 
+	// Sync admin flag from config (config is source of truth)
+	expectedAdmin := s.isAdminNickname(user.Nickname)
+	hasAdmin := user.UserFlags&uint8(protocol.UserFlagAdmin) != 0
+	if expectedAdmin != hasAdmin {
+		if expectedAdmin {
+			user.UserFlags |= uint8(protocol.UserFlagAdmin)
+		} else {
+			user.UserFlags &^= uint8(protocol.UserFlagAdmin)
+		}
+		if err := s.db.UpdateUserFlags(user.ID, user.UserFlags); err != nil {
+			log.Printf("Session %d: failed to sync admin flags for user %s: %v", sess.ID, user.Nickname, err)
+		}
+	}
+
 	// Update session with user ID and flags
 	sess.mu.Lock()
 	sess.UserID = &user.ID
@@ -325,8 +339,14 @@ func (s *Server) handleRegisterUser(sess *Session, frame *protocol.Frame) error 
 		return s.sendError(sess, 9000, "Failed to hash password")
 	}
 
+	// Check if nickname is in admin list
+	var userFlags uint8
+	if s.isAdminNickname(nickname) {
+		userFlags = uint8(protocol.UserFlagAdmin)
+	}
+
 	// Create user in database
-	userID, err := s.db.CreateUser(nickname, string(hashedPassword), 0) // 0 = no special flags
+	userID, err := s.db.CreateUser(nickname, string(hashedPassword), userFlags)
 	if err != nil {
 		// Check for unique constraint violation
 		if strings.Contains(err.Error(), "UNIQUE constraint") {
@@ -342,7 +362,7 @@ func (s *Server) handleRegisterUser(sess *Session, frame *protocol.Frame) error 
 	// Update session with user ID
 	sess.mu.Lock()
 	sess.UserID = &userID
-	sess.UserFlags = 0 // Regular user
+	sess.UserFlags = userFlags
 	sess.mu.Unlock()
 
 	// Update database session

@@ -414,6 +414,20 @@ func (s *Server) authenticateSSHKey(conn ssh.ConnMetadata, pubKey ssh.PublicKey)
 			// Continue with auth - shadowban is enforced during message broadcasting
 		}
 
+		// Sync admin flag from config (config is source of truth)
+		expectedAdmin := s.isAdminNickname(user.Nickname)
+		hasAdmin := user.UserFlags&uint8(protocol.UserFlagAdmin) != 0
+		if expectedAdmin != hasAdmin {
+			if expectedAdmin {
+				user.UserFlags |= uint8(protocol.UserFlagAdmin)
+			} else {
+				user.UserFlags &^= uint8(protocol.UserFlagAdmin)
+			}
+			if err := s.db.UpdateUserFlags(user.ID, user.UserFlags); err != nil {
+				log.Printf("SSH auth: failed to sync admin flags for user %s: %v", user.Nickname, err)
+			}
+		}
+
 		log.Printf("SSH auth: user %s (ID: %d, fingerprint: %s)", user.Nickname, user.ID, fingerprint)
 
 		// Return permissions with user info
@@ -433,6 +447,13 @@ func (s *Server) authenticateSSHKey(conn ssh.ConnMetadata, pubKey ssh.PublicKey)
 		username = "user" // Fallback
 	}
 
+	// Reject if nickname is already registered (prevent impersonation)
+	existingUser, _ := s.db.GetUserByNickname(username)
+	if existingUser != nil {
+		log.Printf("SSH auto-register rejected: nickname %q already registered (user ID: %d)", username, existingUser.ID)
+		return nil, fmt.Errorf("nickname %q is already registered; add your SSH key via the client", username)
+	}
+
 	// Check rate limiting (max 10 auto-registers per hour from same IP)
 	if !s.checkAutoRegisterRateLimit(conn.RemoteAddr().String()) {
 		log.Printf("SSH auto-register rate limit exceeded from %s", conn.RemoteAddr())
@@ -447,7 +468,11 @@ func (s *Server) authenticateSSHKey(conn ssh.ConnMetadata, pubKey ssh.PublicKey)
 		return nil, fmt.Errorf("failed to hash password")
 	}
 
-	userID, err := s.db.CreateUser(username, string(hashedPassword), 0) // 0 = no special flags
+	var userFlags uint8
+	if s.isAdminNickname(username) {
+		userFlags = uint8(protocol.UserFlagAdmin)
+	}
+	userID, err := s.db.CreateUser(username, string(hashedPassword), userFlags)
 	if err != nil {
 		log.Printf("Failed to auto-register user %s: %v", username, err)
 		return nil, fmt.Errorf("failed to auto-register user: %w", err)
@@ -475,7 +500,7 @@ func (s *Server) authenticateSSHKey(conn ssh.ConnMetadata, pubKey ssh.PublicKey)
 		Extensions: map[string]string{
 			"user_id":    fmt.Sprintf("%d", userID),
 			"nickname":   username,
-			"user_flags": "0",
+			"user_flags": fmt.Sprintf("%d", userFlags),
 			"pubkey_fp":  fingerprint,
 		},
 	}, nil

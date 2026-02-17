@@ -1536,6 +1536,14 @@ func (db *DB) UpdateUserPassword(userID int64, newPasswordHash string) error {
 	return err
 }
 
+// UpdateUserFlags updates a user's flags (e.g. admin, moderator)
+func (db *DB) UpdateUserFlags(userID int64, flags uint8) error {
+	_, err := db.writeConn.Exec(`
+		UPDATE User SET user_flags = ? WHERE id = ?
+	`, flags, userID)
+	return err
+}
+
 // ===== SSH Key Methods (V2 SSH Authentication) =====
 
 // CreateSSHKey adds a new SSH public key for a user
