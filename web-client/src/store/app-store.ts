@@ -361,11 +361,9 @@ export const storeActions = {
     }))
   },
 
-  // Reset connection state
+  // Reset connection state (preserves nickname/serverUrl — they're user identity, not session state)
   resetConnection() {
     setConnectionState('disconnected')
-    setServerUrl('')
-    setNickname('')
     setIsRegistered(false)
     setErrorMessage('')
     setActiveChannelId(null)

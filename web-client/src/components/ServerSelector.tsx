@@ -297,6 +297,7 @@ const ServerSelector: Component<ServerSelectorProps> = (props) => {
 
     // Save to localStorage
     localStorage.setItem('superchat_nickname', nickname())
+    localStorage.setItem('superchat_last_url', finalUrl)
     localStorage.setItem('superchat_server_index', selectedIndex().toString())
     localStorage.setItem('superchat_server_secure', server.isSecure.toString())
     localStorage.setItem('superchat_throttle_speed', throttleSpeed().toString())

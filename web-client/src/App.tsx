@@ -1,4 +1,4 @@
-import { Component, createEffect, onCleanup, For, Show, createSignal, createMemo } from 'solid-js'
+import { Component, createEffect, onCleanup, onMount, For, Show, createSignal, createMemo } from 'solid-js'
 import { getProtocolBridge, destroyProtocolBridge } from './lib/protocol-bridge'
 import { store, storeActions, ViewState, ModalState, FocusArea } from './store/app-store'
 import { selectors } from './store/selectors'
@@ -10,7 +10,7 @@ import ComposeModal from './components/ComposeModal'
 import StartDMModal from './components/StartDMModal'
 import DMRequestModal from './components/DMRequestModal'
 import EncryptionSetupModal from './components/EncryptionSetupModal'
-import type { Message } from './SuperChatCodec'
+import { DM_TARGET_BY_USER_ID, DM_TARGET_BY_SESSION_ID, type Message } from './SuperChatCodec'
 import { encryptMessage } from './lib/crypto'
 import {
   CommandExecutor,
@@ -46,6 +46,7 @@ const App: Component = () => {
   const dmChannels = selectors.dmChannelsArray
   const isCurrentChannelDM = selectors.isCurrentChannelDM
   const currentDMChannel = selectors.currentDMChannel
+  const onlineUsers = selectors.onlineUsers
   // Flatten thread messages for keyboard navigation (root + all nested replies in display order)
   const flattenedThreadMessages = createMemo(() => {
     const thread = currentThread()
@@ -244,7 +245,6 @@ const App: Component = () => {
           if (idx >= 0 && idx < messages.length) {
             const msg = messages[idx]
             handleReply(msg.message_id, msg)
-            storeActions.openModal(ModalState.Compose)
           }
         }
         break
@@ -275,6 +275,18 @@ const App: Component = () => {
   onCleanup(() => {
     client.disconnect()
     destroyProtocolBridge()
+  })
+
+  // Auto-connect on page load if saved credentials exist
+  onMount(() => {
+    const savedUrl = localStorage.getItem('superchat_last_url')
+    const savedNickname = localStorage.getItem('superchat_nickname')
+    const savedThrottle = localStorage.getItem('superchat_throttle_speed')
+
+    if (savedUrl && savedNickname) {
+      const throttleBps = savedThrottle ? parseInt(savedThrottle, 10) : 0
+      handleConnect(savedUrl, savedNickname, throttleBps)
+    }
   })
 
   // Auto-request message list when channel changes
@@ -353,7 +365,12 @@ const App: Component = () => {
       client.unsubscribeChannel(store.subscribedChannelId)
     }
 
+    // Clear saved URL so next page load shows ServerSelector instead of auto-connecting
+    localStorage.removeItem('superchat_last_url')
+
     client.disconnect()
+    store.setNickname('')
+    store.setServerUrl('')
     storeActions.resetConnection()
   }
 
@@ -402,6 +419,7 @@ const App: Component = () => {
       replyToId: messageId,
       replyToMessage: message
     })
+    storeActions.openModal(ModalState.Compose)
   }
 
   const handleComposeSend = async (content: string) => {
@@ -510,7 +528,7 @@ const App: Component = () => {
               <div class="flex items-center justify-between mb-2">
                 <div>
                   <h2 class="font-bold text-lg">SuperChat</h2>
-                  <p class="text-sm text-base-content/70">{store.nickname}</p>
+                  <p class="text-sm text-base-content/70">{store.isRegistered ? '' : '~'}{store.nickname}</p>
                 </div>
                 <button
                   onClick={handleDisconnect}
@@ -770,6 +788,63 @@ const App: Component = () => {
                   </Show>
                 </div>
               </div>
+            </div>
+          </div>
+
+          {/* Right Panel - Online Users */}
+          <div class="w-48 bg-base-200 border-l border-base-300 flex flex-col">
+            <div class="p-3 border-b border-base-300 flex-shrink-0">
+              <h3 class="font-semibold text-sm uppercase text-base-content/70">
+                Online ({onlineUsers().length})
+              </h3>
+            </div>
+            <div class="p-2 flex-1 overflow-y-auto">
+              <Show
+                when={onlineUsers().length > 0}
+                fallback={
+                  <div class="text-xs text-base-content/50 p-2">No users yet</div>
+                }
+              >
+                <div class="space-y-0.5">
+                  <For each={onlineUsers()}>
+                    {(user) => {
+                      const isSelf = () => user.sessionId === store.selfSessionId
+                      const flagPrefix = () => {
+                        if (user.userFlags & 1) return '$'  // admin
+                        if (user.userFlags & 2) return '@'  // moderator
+                        return ''
+                      }
+                      return (
+                        <div
+                          class={`flex items-center gap-1 px-2 py-1 rounded text-sm ${
+                            isSelf() ? 'text-primary' : 'text-base-content/80 hover:bg-base-300 cursor-pointer'
+                          }`}
+                          onClick={() => {
+                            if (!isSelf()) {
+                              // Start DM with this user
+                              const client = bridge.getClient()
+                              if (user.isRegistered && user.userId !== null) {
+                                client.startDM(DM_TARGET_BY_USER_ID, user.userId, null, false)
+                              } else {
+                                client.startDM(DM_TARGET_BY_SESSION_ID, user.sessionId, null, false)
+                              }
+                            }
+                          }}
+                          title={isSelf() ? 'You' : `Click to DM ${user.nickname}`}
+                        >
+                          <span class="font-mono text-xs text-primary shrink-0">
+                            {flagPrefix()}{user.isRegistered ? '' : '~'}
+                          </span>
+                          <span class="truncate">{user.nickname}</span>
+                          <Show when={isSelf()}>
+                            <span class="text-xs text-base-content/40 shrink-0">(you)</span>
+                          </Show>
+                        </div>
+                      )
+                    }}
+                  </For>
+                </div>
+              </Show>
             </div>
           </div>
         </div>

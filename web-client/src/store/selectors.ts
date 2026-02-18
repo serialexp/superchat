@@ -280,6 +280,14 @@ export const onlineUsersForDM = createMemo<PresenceEntry[]>(() => {
 })
 
 /**
+ * Get all online users (includes self, sorted by nickname)
+ */
+export const onlineUsers = createMemo<PresenceEntry[]>(() => {
+  return Array.from(store.serverRoster.values())
+    .sort((a, b) => a.nickname.localeCompare(b.nickname))
+})
+
+/**
  * Export a convenience object with all selectors
  */
 export const selectors = {
@@ -304,6 +312,7 @@ export const selectors = {
   currentDMChannel,
   isCurrentChannelEncrypted,
   onlineUsersForDM,
+  onlineUsers,
 }
 
 export default selectors
