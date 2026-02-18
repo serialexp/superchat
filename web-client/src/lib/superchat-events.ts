@@ -19,6 +19,8 @@ import type {
   ChannelDeleted,
   ServerPresence,
   ChannelPresence,
+  AuthResponse,
+  UserInfo,
   KeyRequired,
   DMReady,
   DMPending,
@@ -46,6 +48,8 @@ export type SuperChatEvent =
   | { type: 'channel-deleted', data: ChannelDeleted }
   | { type: 'server-presence', data: ServerPresence }
   | { type: 'channel-presence', data: ChannelPresence }
+  | { type: 'user-info', info: UserInfo }
+  | { type: 'auth-response', response: AuthResponse }
   | { type: 'key-required', data: KeyRequired }
   | { type: 'dm-ready', data: DMReady }
   | { type: 'dm-pending', data: DMPending }
@@ -112,6 +116,12 @@ export class SuperChatEventClient {
       },
       onChannelPresence: (data) => {
         this.emit({ type: 'channel-presence', data })
+      },
+      onUserInfo: (info) => {
+        this.emit({ type: 'user-info', info })
+      },
+      onAuthResponse: (response) => {
+        this.emit({ type: 'auth-response', response })
       },
       onKeyRequired: (data) => {
         this.emit({ type: 'key-required', data })
@@ -288,6 +298,13 @@ export class SuperChatEventClient {
   leaveChannel(channelId: bigint, permanent: boolean = false): void {
     this.client.leaveChannel(channelId, permanent)
   }
+
+  /**
+   * Send authentication request with pre-hashed password
+   */
+  sendAuthRequest(nickname: string, hashedPassword: string): void {
+    this.client.sendAuthRequest(nickname, hashedPassword)
+  }
 }
 
 /**
@@ -323,6 +340,8 @@ export const onMessageDeleted = createEventFilter('message-deleted')
 export const onChannelDeleted = createEventFilter('channel-deleted')
 export const onServerPresence = createEventFilter('server-presence')
 export const onChannelPresence = createEventFilter('channel-presence')
+export const onUserInfo = createEventFilter('user-info')
+export const onAuthResponse = createEventFilter('auth-response')
 export const onKeyRequired = createEventFilter('key-required')
 export const onDMReady = createEventFilter('dm-ready')
 export const onDMPending = createEventFilter('dm-pending')

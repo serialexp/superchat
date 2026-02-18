@@ -6,7 +6,7 @@ import { SuperChatEventClient, type SuperChatEvent } from './superchat-events'
 import { store, storeActions, ModalState } from '../store/app-store'
 import { rebuildIndexes, addMessageToIndexes } from './message-indexer'
 import { computeSharedSecret, deriveChannelKey, decryptMessage, KEY_TYPE_GENERATED } from './crypto'
-import type { ChannelCreated, MessageEdited, MessageDeleted, ChannelDeleted, ServerPresence, ChannelPresence, KeyRequired, DMReady, DMPending, DMRequest, DMParticipantLeft, DMDeclined, NewMessage, Message } from '../SuperChatCodec'
+import type { ChannelCreated, MessageEdited, MessageDeleted, ChannelDeleted, ServerPresence, ChannelPresence, AuthResponse, UserInfo, KeyRequired, DMReady, DMPending, DMRequest, DMParticipantLeft, DMDeclined, NewMessage, Message } from '../SuperChatCodec'
 
 /**
  * Try to decrypt a message's content_raw using the channel's encryption key.
@@ -131,6 +131,14 @@ export class ProtocolBridge {
 
       case 'channel-presence':
         this.handleChannelPresence(event.data)
+        break
+
+      case 'user-info':
+        this.handleUserInfo(event.info)
+        break
+
+      case 'auth-response':
+        this.handleAuthResponse(event.response)
         break
 
       case 'key-required':
@@ -391,6 +399,37 @@ export class ProtocolBridge {
    */
   private handleChannelPresence(data: ChannelPresence): void {
     console.log(`Channel presence: ${data.nickname} ${data.joined ? 'joined' : 'left'} channel ${data.channel_id}`)
+  }
+
+  /**
+   * Handle USER_INFO - server informs us about a nickname's registration status
+   * If the nickname is registered and matches ours, offer authentication
+   */
+  private handleUserInfo(info: UserInfo): void {
+    console.log('User info:', info.nickname, 'registered:', info.is_registered)
+
+    if (info.is_registered && info.nickname === store.nickname) {
+      store.setPendingAuthNickname(info.nickname)
+      store.setAuthError('')
+      storeActions.openModal(ModalState.Password)
+    }
+  }
+
+  /**
+   * Handle AUTH_RESPONSE - result of authentication attempt
+   */
+  private handleAuthResponse(response: AuthResponse): void {
+    if (response.success === 1) {
+      console.log('Authentication successful:', response.nickname)
+      store.setIsRegistered(true)
+      store.setNickname(response.nickname)
+      store.setPendingAuthNickname('')
+      store.setAuthError('')
+      storeActions.closeModal()
+    } else {
+      console.log('Authentication failed:', response.message)
+      store.setAuthError(response.message)
+    }
   }
 
   /**

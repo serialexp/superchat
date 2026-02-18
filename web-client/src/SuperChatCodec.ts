@@ -88,6 +88,48 @@ export class FrameHeaderDecoder extends BitStreamDecoder {
 }
 
 /**
+ * User info response (0x8F)
+ * Wire format: String(Nickname) Bool(IsRegistered) OptionalUint64(UserID) Bool(Online)
+ */
+export interface UserInfo {
+  nickname: string;
+  is_registered: boolean;
+  user_id: bigint | null;
+  online: boolean;
+}
+
+export class UserInfoDecoder extends BitStreamDecoder {
+  constructor(bytes: Uint8Array | number[], private context?: any) {
+    super(bytes, "msb_first");
+  }
+
+  decode(): UserInfo {
+    // String(Nickname)
+    const nickname_length = this.readUint16("big_endian");
+    const nickname_bytes: number[] = [];
+    for (let i = 0; i < nickname_length; i++) {
+      nickname_bytes.push(this.readUint8());
+    }
+    const nickname = new TextDecoder().decode(new Uint8Array(nickname_bytes));
+
+    // Bool(IsRegistered)
+    const is_registered = this.readUint8() === 1;
+
+    // OptionalUint64(UserID) — present byte + optional value
+    const user_id_present = this.readUint8();
+    let user_id: bigint | null = null;
+    if (user_id_present === 1) {
+      user_id = this.readUint64("big_endian");
+    }
+
+    // Bool(Online)
+    const online = this.readUint8() === 1;
+
+    return { nickname, is_registered, user_id, online };
+  }
+}
+
+/**
  * Authentication request with password
  */
 export interface AuthRequest {
@@ -146,77 +188,62 @@ export class AuthRequestDecoder extends BitStreamDecoder {
 
 /**
  * Authentication response
+ * Wire format: Bool(Success) [if Success: Uint64(UserID), String(Nickname)] String(Message) [if Success && remaining: Uint8(UserFlags)]
  */
 export interface AuthResponse {
   success: number;
-  user_id: { present: number, value?: bigint };
-  nickname: { present: number, value?: String };
-  message: String;
-}
-
-export class AuthResponseEncoder extends BitStreamEncoder {
-  private compressionDict: Map<string, number> = new Map();
-
-  constructor() {
-    super("msb_first");
-  }
-
-  encode(value: AuthResponse): Uint8Array {
-    // Reset compression dictionary for each encode
-    this.compressionDict.clear();
-
-    this.writeUint8(value.success);
-    this.writeUint8(value.user_id.present);
-    if (value.user_id.present == 1 && value.user_id.value !== undefined) {
-      this.writeUint64(value.user_id.value, "big_endian");
-    }
-    this.writeUint8(value.nickname.present);
-    if (value.nickname.present == 1 && value.nickname.value !== undefined) {
-      const value_nickname_value_bytes = new TextEncoder().encode(value.nickname.value);
-      this.writeUint16(value_nickname_value_bytes.length, "big_endian");
-      for (const byte of value_nickname_value_bytes) {
-        this.writeUint8(byte);
-      }
-    }
-    const value_message_bytes = new TextEncoder().encode(value.message);
-    this.writeUint16(value_message_bytes.length, "big_endian");
-    for (const byte of value_message_bytes) {
-      this.writeUint8(byte);
-    }
-    return this.finish();
-  }
+  user_id: bigint;
+  nickname: string;
+  message: string;
+  user_flags?: number;
 }
 
 export class AuthResponseDecoder extends BitStreamDecoder {
+  private payloadLength: number;
+
   constructor(bytes: Uint8Array | number[], private context?: any) {
     super(bytes, "msb_first");
+    this.payloadLength = bytes.length;
   }
 
   decode(): AuthResponse {
     const value: any = {};
+    let bytesRead = 0;
 
     value.success = this.readUint8();
-    value.user_id = {};
-    value.user_id.present = this.readUint8();
-    if (value.user_id.present == 1) {
-      value.user_id.value = this.readUint64("big_endian");
-    }
-    value.nickname = {};
-    value.nickname.present = this.readUint8();
-    if (value.nickname.present == 1) {
-      const nickname_value_length = this.readUint16("big_endian");
-      const nickname_value_bytes: number[] = [];
-      for (let i = 0; i < nickname_value_length; i++) {
-        nickname_value_bytes.push(this.readUint8());
+    bytesRead += 1;
+
+    if (value.success === 1) {
+      value.user_id = this.readUint64("big_endian");
+      bytesRead += 8;
+
+      const nickname_length = this.readUint16("big_endian");
+      bytesRead += 2;
+      const nickname_bytes: number[] = [];
+      for (let i = 0; i < nickname_length; i++) {
+        nickname_bytes.push(this.readUint8());
+        bytesRead += 1;
       }
-      value.nickname.value = new TextDecoder().decode(new Uint8Array(nickname_value_bytes));
+      value.nickname = new TextDecoder().decode(new Uint8Array(nickname_bytes));
+    } else {
+      value.user_id = 0n;
+      value.nickname = '';
     }
+
     const message_length = this.readUint16("big_endian");
+    bytesRead += 2;
     const message_bytes: number[] = [];
     for (let i = 0; i < message_length; i++) {
       message_bytes.push(this.readUint8());
+      bytesRead += 1;
     }
     value.message = new TextDecoder().decode(new Uint8Array(message_bytes));
+
+    // Optional UserFlags (only present on success with remaining bytes)
+    if (value.success === 1 && bytesRead < this.payloadLength) {
+      value.user_flags = this.readUint8();
+    }
+
     return value;
   }
 }

@@ -10,6 +10,7 @@ import ComposeModal from './components/ComposeModal'
 import StartDMModal from './components/StartDMModal'
 import DMRequestModal from './components/DMRequestModal'
 import EncryptionSetupModal from './components/EncryptionSetupModal'
+import PasswordModal from './components/PasswordModal'
 import { DM_TARGET_BY_USER_ID, DM_TARGET_BY_SESSION_ID, type Message } from './SuperChatCodec'
 import { encryptMessage } from './lib/crypto'
 import {
@@ -952,10 +953,11 @@ const App: Component = () => {
         onCancel={handleComposeCancel}
       />
 
-      {/* DM Modals (self-contained, read from store) */}
+      {/* Self-contained modals (read from store) */}
       <StartDMModal />
       <DMRequestModal />
       <EncryptionSetupModal />
+      <PasswordModal />
     </div>
   )
 }

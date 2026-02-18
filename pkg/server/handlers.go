@@ -430,15 +430,6 @@ func (s *Server) handleSetNickname(sess *Session, frame *protocol.Frame) error {
 	existingUser, err := s.db.GetUserByNickname(msg.Nickname)
 	isRegistered := (err == nil)
 
-	// If nickname is registered and session is not authenticated as that user
-	if isRegistered && (sess.UserID == nil || *sess.UserID != existingUser.ID) {
-		resp := &protocol.NicknameResponseMessage{
-			Success: false,
-			Message: "Nickname registered, password required",
-		}
-		return s.sendMessage(sess, protocol.TypeNicknameResponse, resp)
-	}
-
 	// Determine if this is a change or initial set
 	oldNickname := sess.Nickname
 	isChange := oldNickname != "" && oldNickname != msg.Nickname
@@ -486,6 +477,21 @@ func (s *Server) handleSetNickname(sess *Session, frame *protocol.Frame) error {
 	sess.mu.RUnlock()
 	if joined != nil {
 		s.notifyChannelPresence(*joined, sess, true)
+	}
+
+	// If nickname is registered and session is not authenticated as that user,
+	// proactively send USER_INFO so the client can offer authentication
+	if isRegistered && (sess.UserID == nil || *sess.UserID != existingUser.ID) {
+		uid := uint64(existingUser.ID)
+		userInfo := &protocol.UserInfoMessage{
+			Nickname:     msg.Nickname,
+			IsRegistered: true,
+			UserID:       &uid,
+			Online:       true, // They just set it, so they're online
+		}
+		if err := s.sendMessage(sess, protocol.TypeUserInfo, userInfo); err != nil {
+			log.Printf("Session %d: failed to send proactive USER_INFO: %v", sess.ID, err)
+		}
 	}
 
 	return nil

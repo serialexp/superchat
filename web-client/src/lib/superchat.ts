@@ -4,6 +4,8 @@
 import {
   FrameHeaderEncoder, FrameHeaderDecoder,
   SetNicknameEncoder, NicknameResponseDecoder,
+  AuthRequestEncoder, AuthResponseDecoder,
+  UserInfoDecoder,
   ListChannelsEncoder, ChannelListDecoder,
   JoinChannelEncoder, JoinResponseDecoder,
   ListMessagesEncoder, MessageListDecoder,
@@ -45,6 +47,8 @@ import {
   type ChannelDeleted,
   type ServerPresence,
   type ChannelPresence,
+  type AuthResponse,
+  type UserInfo,
   type KeyRequired,
   type DMReady,
   type DMPending,
@@ -54,6 +58,9 @@ import {
 } from '../SuperChatCodec'
 
 // Protocol message type codes
+const MSG_AUTH_REQUEST = 0x01
+const MSG_AUTH_RESPONSE = 0x81
+const MSG_USER_INFO = 0x8F
 const MSG_SET_NICKNAME = 0x02
 const MSG_NICKNAME_RESPONSE = 0x82
 const MSG_LIST_CHANNELS = 0x04
@@ -110,6 +117,8 @@ export interface SuperChatClientEvents {
   onChannelDeleted?: (data: ChannelDeleted) => void
   onServerPresence?: (data: ServerPresence) => void
   onChannelPresence?: (data: ChannelPresence) => void
+  onUserInfo?: (info: UserInfo) => void
+  onAuthResponse?: (response: AuthResponse) => void
   onKeyRequired?: (data: KeyRequired) => void
   onDMReady?: (data: DMReady) => void
   onDMPending?: (data: DMPending) => void
@@ -317,6 +326,12 @@ export class SuperChatClient {
         case MSG_SERVER_CONFIG:
           this.handleServerConfig(payload)
           break
+        case MSG_AUTH_RESPONSE:
+          this.handleAuthResponse(payload)
+          break
+        case MSG_USER_INFO:
+          this.handleUserInfo(payload)
+          break
         case MSG_NICKNAME_RESPONSE:
           this.handleNicknameResponse(payload)
           break
@@ -404,6 +419,39 @@ export class SuperChatClient {
       this.sendListChannels()
     } else {
       this.events.onError(response.message)
+    }
+  }
+
+  sendAuthRequest(nickname: string, hashedPassword: string) {
+    const encoder = new AuthRequestEncoder()
+    const payload = encoder.encode({ nickname, password: hashedPassword })
+    this.sendFrame(MSG_AUTH_REQUEST, payload)
+  }
+
+  private handleAuthResponse(payload: Uint8Array) {
+    const decoder = new AuthResponseDecoder(payload)
+    const response = decoder.decode()
+    console.log('Auth response:', response)
+
+    if (response.success === 1) {
+      // Auth succeeded — server has upgraded our session to authenticated.
+      // Channels are already loaded (nickname was set successfully before auth).
+      // Server sends a fresh presence snapshot so other clients see us as registered.
+      console.log('Authentication successful for:', response.nickname)
+    }
+
+    if (this.events.onAuthResponse) {
+      this.events.onAuthResponse(response)
+    }
+  }
+
+  private handleUserInfo(payload: Uint8Array) {
+    const decoder = new UserInfoDecoder(payload)
+    const info = decoder.decode()
+    console.log('User info:', info)
+
+    if (this.events.onUserInfo) {
+      this.events.onUserInfo(info)
     }
   }
 

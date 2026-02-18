@@ -24,7 +24,8 @@ export enum ModalState {
   ConfirmDelete = 'confirm-delete',
   StartDM = 'start-dm',
   DMRequest = 'dm-request',
-  EncryptionSetup = 'encryption-setup'
+  EncryptionSetup = 'encryption-setup',
+  Password = 'password'
 }
 
 // Focus area for keyboard navigation
@@ -183,6 +184,8 @@ const [selfSessionId, setSelfSessionId] = createSignal<bigint | null>(null)
 const [activeDMInvite, setActiveDMInvite] = createSignal<DMInvite | null>(null)
 const [pendingEncryptionChannelId, setPendingEncryptionChannelId] = createSignal<bigint | null>(null)
 const [encryptionSetupReason, setEncryptionSetupReason] = createSignal<string>('')
+const [pendingAuthNickname, setPendingAuthNickname] = createSignal<string>('')
+const [authError, setAuthError] = createSignal<string>('')
 
 // Export the store as an object with getters and setters
 export const store = {
@@ -294,6 +297,12 @@ export const store = {
 
   get encryptionSetupReason() { return encryptionSetupReason() },
   setEncryptionSetupReason,
+
+  get pendingAuthNickname() { return pendingAuthNickname() },
+  setPendingAuthNickname,
+
+  get authError() { return authError() },
+  setAuthError,
 }
 
 // Helper actions for common operations
