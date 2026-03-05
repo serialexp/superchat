@@ -289,9 +289,9 @@ func (s *Store) UpdateMessage(serverID int64, msg *gen.MessageEdited) error {
 // DeleteMessage applies a soft delete to a message identified by server and remote ID.
 func (s *Store) DeleteMessage(serverID int64, msg *gen.MessageDeleted) error {
 	_, err := s.db.Exec(`
-		UPDATE Message SET deleted_at = ?
+		UPDATE Message SET deleted_at = ?, content = ?
 		WHERE server_id = ? AND remote_id = ?
-	`, msg.DeletedAt, serverID, msg.MessageId)
+	`, msg.DeletedAt, msg.Content, serverID, msg.MessageId)
 	return err
 }
 

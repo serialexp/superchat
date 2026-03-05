@@ -104,6 +104,7 @@
       "sequence": [
         { "name": "message_id", "type": "uint64" },
         { "name": "channel_id", "type": "uint64" },
+        { "name": "content", "type": "String", "description": "Replacement content (e.g. '[deleted by ~user]')" },
         { "name": "deleted_at", "type": "int64" }
       ]
     }

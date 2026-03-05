@@ -194,7 +194,7 @@ func TestStoreDeleteMessage(t *testing.T) {
 
 	// Delete message
 	if err := store.DeleteMessage(srvID, &gen.MessageDeleted{
-		MessageId: 100, ChannelId: 1, DeletedAt: 1700000002000,
+		MessageId: 100, ChannelId: 1, Content: "[deleted by ~alice]", DeletedAt: 1700000002000,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -205,6 +205,9 @@ func TestStoreDeleteMessage(t *testing.T) {
 	}
 	if msgs[0].DeletedAt == nil || *msgs[0].DeletedAt != 1700000002000 {
 		t.Errorf("DeletedAt = %v, want 1700000002000", msgs[0].DeletedAt)
+	}
+	if msgs[0].Content != "[deleted by ~alice]" {
+		t.Errorf("Content = %q, want %q", msgs[0].Content, "[deleted by ~alice]")
 	}
 }
 

@@ -1,11 +1,13 @@
 package server
 
 import (
+	"fmt"
 	"log"
 
 	"github.com/aeolun/superchat/pkg/archive"
 	gen "github.com/aeolun/superchat/pkg/archive/generated"
 	"github.com/aeolun/superchat/pkg/database"
+	"github.com/aeolun/superchat/pkg/protocol"
 )
 
 // archiveProvider implements archive.BackfillProvider using the server's MemDB.
@@ -53,7 +55,7 @@ func (p *archiveProvider) ArchiveMessages(channelID int64, afterMessageID int64)
 			ParentID:       m.ParentID,
 			ThreadRootID:   m.ThreadRootID,
 			AuthorUserID:   m.AuthorUserID,
-			AuthorNickname: m.AuthorNickname,
+			AuthorNickname: p.server.archiveDisplayNickname(p.db, m),
 			Content:        m.Content,
 			CreatedAt:      m.CreatedAt,
 			EditedAt:       m.EditedAt,
@@ -84,7 +86,7 @@ func (s *Server) archiveNewMessage(dbMsg *database.Message) {
 		ParentId:       int64PtrToUint64Ptr(dbMsg.ParentID),
 		ThreadRootId:   int64PtrToUint64Ptr(dbMsg.ThreadRootID),
 		AuthorUserId:   int64PtrToUint64Ptr(dbMsg.AuthorUserID),
-		AuthorNickname: dbMsg.AuthorNickname,
+		AuthorNickname: s.archiveDisplayNickname(s.db, dbMsg),
 		Content:        dbMsg.Content,
 		CreatedAt:      dbMsg.CreatedAt,
 		EditedAt:       dbMsg.EditedAt,
@@ -125,8 +127,27 @@ func (s *Server) archiveMessageDeleted(dbMsg *database.Message) {
 	s.archiveClient.EnqueueDelete(&gen.MessageDeleted{
 		MessageId: uint64(dbMsg.ID),
 		ChannelId: uint64(dbMsg.ChannelID),
+		Content:   dbMsg.Content,
 		DeletedAt: deletedAt,
 	})
+}
+
+// archiveDisplayNickname applies the same prefix logic as the protocol layer:
+// ~ for anonymous, $ for admin, @ for moderator, plain for registered users.
+func (s *Server) archiveDisplayNickname(db *database.MemDB, dbMsg *database.Message) string {
+	nickname := dbMsg.AuthorNickname
+	if dbMsg.AuthorUserID != nil {
+		user, err := db.GetUserByID(*dbMsg.AuthorUserID)
+		if err == nil {
+			prefix := protocol.UserFlags(user.UserFlags).DisplayPrefix()
+			nickname = prefix + user.Nickname
+		} else {
+			nickname = "<user:" + fmt.Sprint(*dbMsg.AuthorUserID) + ">"
+		}
+	} else if dbMsg.AuthorNickname != "" {
+		nickname = "~" + dbMsg.AuthorNickname
+	}
+	return nickname
 }
 
 func int64PtrToUint64Ptr(p *int64) *uint64 {

@@ -124,10 +124,13 @@ func TestFramingRoundTrip(t *testing.T) {
 		{
 			name:    "MessageDeleted",
 			msgType: TypeMessageDeleted,
-			msg:     &gen.MessageDeleted{MessageId: 100, ChannelId: 42, DeletedAt: 1700000003000},
+			msg:     &gen.MessageDeleted{MessageId: 100, ChannelId: 42, Content: "[deleted by ~alice]", DeletedAt: 1700000003000},
 			decode:  func(b []byte) (interface{}, error) { return gen.DecodeMessageDeleted(b) },
 			verify: func(t *testing.T, decoded interface{}) {
 				md := decoded.(*gen.MessageDeleted)
+				if md.Content != "[deleted by ~alice]" {
+					t.Errorf("Content = %q, want %q", md.Content, "[deleted by ~alice]")
+				}
 				if md.DeletedAt != 1700000003000 {
 					t.Errorf("DeletedAt = %d, want 1700000003000", md.DeletedAt)
 				}
@@ -179,7 +182,7 @@ func TestDecodePayloadAllTypes(t *testing.T) {
 		{TypeMessageSync, &gen.MessageSync{MessageId: 1, ChannelId: 1, AuthorNickname: "a", Content: "b", CreatedAt: 1}},
 		{TypeBackfillEnd, &gen.BackfillEnd{ChannelId: 1, MessageCount: 10}},
 		{TypeMessageEdited, &gen.MessageEdited{MessageId: 1, ChannelId: 1, NewContent: "c", EditedAt: 1}},
-		{TypeMessageDeleted, &gen.MessageDeleted{MessageId: 1, ChannelId: 1, DeletedAt: 1}},
+		{TypeMessageDeleted, &gen.MessageDeleted{MessageId: 1, ChannelId: 1, Content: "[deleted by ~x]", DeletedAt: 1}},
 	}
 
 	for _, tt := range types {

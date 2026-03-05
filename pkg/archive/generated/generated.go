@@ -834,6 +834,7 @@ func decodeMessageEditedWithDecoder(decoder *runtime.BitStreamDecoder) (*Message
 type MessageDeleted struct {
 	MessageId uint64
 	ChannelId uint64
+	Content string
 	DeletedAt int64
 }
 
@@ -848,6 +849,7 @@ func (m *MessageDeleted) EncodeWithContext(ctx *runtime.EncodingContext) ([]byte
 	parentFields := map[string]interface{}{
 		"message_id": m.MessageId,
 		"channel_id": m.ChannelId,
+		"content": m.Content,
 		"deleted_at": m.DeletedAt,
 	}
 	childCtx := ctx.ExtendWithParent(parentFields)
@@ -855,6 +857,11 @@ func (m *MessageDeleted) EncodeWithContext(ctx *runtime.EncodingContext) ([]byte
 
 	encoder.WriteUint64(m.MessageId, runtime.BigEndian)
 	encoder.WriteUint64(m.ChannelId, runtime.BigEndian)
+	m_Content_bytes := []byte(m.Content)
+	encoder.WriteUint16(uint16(len(m_Content_bytes)), runtime.BigEndian)
+	for _, b := range m_Content_bytes {
+		encoder.WriteUint8(b)
+	}
 	encoder.WriteInt64(m.DeletedAt, runtime.BigEndian)
 
 	return encoder.Finish(), nil
@@ -865,6 +872,7 @@ func (m *MessageDeleted) CalculateSize() int {
 
 	size += 8 // MessageId
 	size += 8 // ChannelId
+	size += 2 + len(m.Content) // Content (length-prefixed string)
 	size += 8 // DeletedAt
 
 	return size
@@ -889,6 +897,16 @@ func decodeMessageDeletedWithDecoder(decoder *runtime.BitStreamDecoder) (*Messag
 		return nil, fmt.Errorf("failed to decode channel_id: %w", err)
 	}
 	result.ChannelId = channelId
+
+	contentLength, err := decoder.ReadUint16(runtime.BigEndian)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode content length: %w", err)
+	}
+	contentBytes, err := decoder.ReadBytesSlice(int(contentLength))
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode content: %w", err)
+	}
+	result.Content = string(contentBytes)
 
 	deletedAt, err := decoder.ReadInt64(runtime.BigEndian)
 	if err != nil {
