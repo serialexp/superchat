@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"strings"
 )
 
 // BackfillStats reports what a Backfill pass did.
@@ -23,9 +24,14 @@ type BackfillTarget struct {
 	Read  *sql.DB
 	Write *sql.DB
 
-	Table         string
-	IDColumn      string
-	ContentColumn string
+	Table    string
+	IDColumn string
+
+	// ContentColumns are all the text columns to censor. They are handled in a
+	// single pass rather than one pass each, because a message's author nickname
+	// lives in the same row as its content and scanning the table twice to reach
+	// them would double the startup cost for nothing.
+	ContentColumns []string
 }
 
 // backfillBatch is how many rows are read, and then written, per round trip.
@@ -39,8 +45,11 @@ const backfillBatch = 500
 var identifierPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 type pendingUpdate struct {
-	id      int64
-	content string
+	id int64
+	// values holds one entry per ContentColumns, in order. Columns that did not
+	// change carry their original text, so a single prepared statement can write
+	// every row regardless of which columns actually matched.
+	values []string
 }
 
 // Backfill applies the filter to content that is already stored, rewriting only
@@ -63,19 +72,27 @@ func (f *Filter) Backfill(ctx context.Context, t BackfillTarget) (BackfillStats,
 	if f == nil {
 		return stats, nil
 	}
-	for _, name := range []string{t.Table, t.IDColumn, t.ContentColumn} {
+	if len(t.ContentColumns) == 0 {
+		return stats, fmt.Errorf("moderation: no content columns given")
+	}
+	for _, name := range append([]string{t.Table, t.IDColumn}, t.ContentColumns...) {
 		if !identifierPattern.MatchString(name) {
 			return stats, fmt.Errorf("moderation: %q is not a usable SQL identifier", name)
 		}
 	}
 
+	assignments := make([]string, len(t.ContentColumns))
+	for i, col := range t.ContentColumns {
+		assignments[i] = col + " = ?"
+	}
+
 	selectSQL := fmt.Sprintf(
 		"SELECT %s, %s FROM %s WHERE %s > ? ORDER BY %s LIMIT %d",
-		t.IDColumn, t.ContentColumn, t.Table, t.IDColumn, t.IDColumn, backfillBatch,
+		t.IDColumn, strings.Join(t.ContentColumns, ", "), t.Table, t.IDColumn, t.IDColumn, backfillBatch,
 	)
 	updateSQL := fmt.Sprintf(
-		"UPDATE %s SET %s = ? WHERE %s = ?",
-		t.Table, t.ContentColumn, t.IDColumn,
+		"UPDATE %s SET %s WHERE %s = ?",
+		t.Table, strings.Join(assignments, ", "), t.IDColumn,
 	)
 
 	updates := make([]pendingUpdate, 0, backfillBatch)
@@ -84,7 +101,7 @@ func (f *Filter) Backfill(ctx context.Context, t BackfillTarget) (BackfillStats,
 	for {
 		updates = updates[:0]
 
-		batchRows, maxID, err := f.scanBatch(ctx, t.Read, selectSQL, lastID, &updates)
+		batchRows, maxID, err := f.scanBatch(ctx, t.Read, selectSQL, lastID, len(t.ContentColumns), &updates)
 		if err != nil {
 			return stats, fmt.Errorf("moderation: scanning %s: %w", t.Table, err)
 		}
@@ -108,25 +125,45 @@ func (f *Filter) Backfill(ctx context.Context, t BackfillTarget) (BackfillStats,
 // scanBatch reads one page of rows, appending the ones the filter changes to
 // updates. The read cursor is closed before it returns, so the caller is free to
 // write.
-func (f *Filter) scanBatch(ctx context.Context, db *sql.DB, query string, afterID int64, updates *[]pendingUpdate) (rowCount int, maxID int64, err error) {
+func (f *Filter) scanBatch(ctx context.Context, db *sql.DB, query string, afterID int64, numCols int, updates *[]pendingUpdate) (rowCount int, maxID int64, err error) {
 	rows, err := db.QueryContext(ctx, query, afterID)
 	if err != nil {
 		return 0, afterID, err
 	}
 	defer rows.Close()
 
+	// Scan targets are reused across rows; only the rows that change get a copy.
+	var id int64
+	values := make([]string, numCols)
+	dest := make([]any, 0, numCols+1)
+	dest = append(dest, &id)
+	for i := range values {
+		dest = append(dest, &values[i])
+	}
+
+	// Censored text lands in scratch first. Allocating a per-row slice up front
+	// would allocate once per row scanned; the overwhelming majority of rows
+	// match nothing, so the copy only happens for the few that do.
+	scratch := make([]string, numCols)
+
 	maxID = afterID
 	for rows.Next() {
-		var id int64
-		var content string
-		if err := rows.Scan(&id, &content); err != nil {
+		if err := rows.Scan(dest...); err != nil {
 			return rowCount, maxID, err
 		}
 		rowCount++
 		maxID = id
 
-		if censored, changed := f.Censor(content); changed {
-			*updates = append(*updates, pendingUpdate{id: id, content: censored})
+		var rowChanged bool
+		for i, v := range values {
+			censored, changed := f.Censor(v)
+			scratch[i] = censored
+			rowChanged = rowChanged || changed
+		}
+		if rowChanged {
+			row := make([]string, numCols)
+			copy(row, scratch)
+			*updates = append(*updates, pendingUpdate{id: id, values: row})
 		}
 	}
 	return rowCount, maxID, rows.Err()
@@ -147,8 +184,15 @@ func applyUpdates(ctx context.Context, db *sql.DB, updateSQL string, updates []p
 	}
 	defer stmt.Close()
 
+	args := make([]any, 0, len(updates[0].values)+1)
 	for _, u := range updates {
-		if _, err := stmt.ExecContext(ctx, u.content, u.id); err != nil {
+		args = args[:0]
+		for _, v := range u.values {
+			args = append(args, v)
+		}
+		args = append(args, u.id)
+
+		if _, err := stmt.ExecContext(ctx, args...); err != nil {
 			return fmt.Errorf("row %d: %w", u.id, err)
 		}
 	}

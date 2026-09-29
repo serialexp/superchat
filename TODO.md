@@ -58,9 +58,25 @@ is actually enforced.
       already-stored messages during startup (`moderation.Filter.Backfill`),
       controlled by `backfill_on_start` / `--word-filter-backfill`. The archiver
       regenerates HTML after, so published pages get cleaned too.
-- [ ] **Nicknames are not filtered.** Someone can still register or pick a slur as
-      a nickname; only message content is censored. Rejecting such nicknames in
-      `handleSetNickname` is probably better than starring them.
+- [x] ~~**Nicknames are not filtered.**~~ `SET_NICKNAME` and SSH auto-registration
+      now refuse names via `moderation.Filter.MatchesName`, which matches terms
+      anywhere in an identifier (so "xxkikexx" is caught) except for the
+      collision-marked terms, which keep word boundaries so "RaccoonFan" still
+      works. Existing `Message.author_nickname` values are censored by the
+      startup pass.
+- [ ] **Registered users who already hold a filtered nickname keep it.**
+      `User.nickname` is UNIQUE, so censoring it in the backfill could collide;
+      it is left alone and registered authors display from that column. Needs an
+      admin rename, or a forced-rename-on-login path.
+- [ ] **The archiver's word-filter flags are unreachable in Docker.**
+      `docker/archiver/entrypoint.sh` passes only `--listen`, `--db`, `--output`
+      and `--html-interval`, each from an `ARCHIVER_*` env var. The
+      `--word-filter*` flags fall through to their defaults (on), so the image
+      behaves correctly — but an operator running the container cannot turn the
+      filter off, or add/remove terms, without overriding the entrypoint. Add
+      `ARCHIVER_WORD_FILTER`, `ARCHIVER_WORD_FILTER_BACKFILL`,
+      `ARCHIVER_WORD_FILTER_EXTRA/REMOVE/ALLOW` passthrough in the same style.
+      Shipped in v0.6.0 without this.
 - [ ] **Channel names/descriptions are not filtered** either. The archiver stores
       `Channel.description` and renders it into every channel page.
 - [ ] **The startup pass is unconditional, not incremental.** It reads the whole

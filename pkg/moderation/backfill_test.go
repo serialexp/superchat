@@ -68,13 +68,16 @@ func readContent(t *testing.T, db *sql.DB, id int64) string {
 	return content
 }
 
-func messageTarget(db *sql.DB) BackfillTarget {
+func messageTarget(db *sql.DB, columns ...string) BackfillTarget {
+	if len(columns) == 0 {
+		columns = []string{"content"}
+	}
 	return BackfillTarget{
-		Read:          db,
-		Write:         db,
-		Table:         "Message",
-		IDColumn:      "id",
-		ContentColumn: "content",
+		Read:           db,
+		Write:          db,
+		Table:          "Message",
+		IDColumn:       "id",
+		ContentColumns: columns,
 	}
 }
 
@@ -243,14 +246,71 @@ func TestBackfillNilFilterIsNoOp(t *testing.T) {
 	}
 }
 
+// Nicknames live in the same row as the message body, so both are censored in a
+// single pass. A match in either column has to rewrite the row, and the column
+// that did not match must be written back unchanged rather than blanked.
+func TestBackfillMultipleColumns(t *testing.T) {
+	db := newBackfillDB(t)
+	if _, err := db.Exec(`ALTER TABLE Message ADD COLUMN author_nickname TEXT NOT NULL DEFAULT ''`); err != nil {
+		t.Fatalf("add column: %v", err)
+	}
+	f := mustNew(t, Options{})
+
+	type row struct{ nickname, content string }
+	seed := []row{
+		{"nigger", "a perfectly ordinary message"}, // nickname only
+		{"alice", "hey nigger"},                    // content only
+		{"kike", "you gook"},                       // both
+		{"bob", "nothing to see"},                  // neither
+	}
+	for i, r := range seed {
+		if _, err := db.Exec(
+			`INSERT INTO Message (id, content, author_nickname) VALUES (?, ?, ?)`,
+			i+1, r.content, r.nickname); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+	}
+
+	stats, err := f.Backfill(context.Background(), messageTarget(db, "content", "author_nickname"))
+	if err != nil {
+		t.Fatalf("Backfill: %v", err)
+	}
+	if stats.Scanned != 4 {
+		t.Errorf("Scanned = %d, want 4", stats.Scanned)
+	}
+	if stats.Changed != 3 {
+		t.Errorf("Changed = %d, want 3", stats.Changed)
+	}
+
+	want := []row{
+		{"******", "a perfectly ordinary message"},
+		{"alice", "hey ******"},
+		{"****", "you ****"},
+		{"bob", "nothing to see"},
+	}
+	for i, w := range want {
+		var got row
+		if err := db.QueryRow(
+			`SELECT author_nickname, content FROM Message WHERE id = ?`, i+1,
+		).Scan(&got.nickname, &got.content); err != nil {
+			t.Fatalf("select %d: %v", i+1, err)
+		}
+		if got != w {
+			t.Errorf("row %d = %+v, want %+v", i+1, got, w)
+		}
+	}
+}
+
 func TestBackfillRejectsBadIdentifiers(t *testing.T) {
 	db := newBackfillDB(t)
 	f := mustNew(t, Options{})
 
 	bad := []BackfillTarget{
-		{Read: db, Write: db, Table: "Message; DROP TABLE Message", IDColumn: "id", ContentColumn: "content"},
-		{Read: db, Write: db, Table: "Message", IDColumn: "id = 1 OR 1", ContentColumn: "content"},
-		{Read: db, Write: db, Table: "Message", IDColumn: "id", ContentColumn: ""},
+		{Read: db, Write: db, Table: "Message; DROP TABLE Message", IDColumn: "id", ContentColumns: []string{"content"}},
+		{Read: db, Write: db, Table: "Message", IDColumn: "id = 1 OR 1", ContentColumns: []string{"content"}},
+		{Read: db, Write: db, Table: "Message", IDColumn: "id", ContentColumns: []string{""}},
+		{Read: db, Write: db, Table: "Message", IDColumn: "id", ContentColumns: []string{"content", "x; DROP TABLE Message"}},
+		{Read: db, Write: db, Table: "Message", IDColumn: "id"}, // no columns at all
 	}
 	for _, target := range bad {
 		if _, err := f.Backfill(context.Background(), target); err == nil {

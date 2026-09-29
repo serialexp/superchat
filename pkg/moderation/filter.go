@@ -45,6 +45,10 @@ const (
 type term struct {
 	norm []byte // normalized, with wildcard standing in for spaces
 	mode matchMode
+
+	// collision marks a term with a legitimate English use, which keeps its
+	// word-boundary requirement even in MatchesName.
+	collision bool
 }
 
 // Filter censors terms in a string. It is safe for concurrent use and a nil
@@ -105,7 +109,11 @@ func New(opts Options) (*Filter, error) {
 		if spec.substring {
 			mode = matchSubstring
 		}
-		f.buckets[norm[0]] = append(f.buckets[norm[0]], term{norm: norm, mode: mode})
+		f.buckets[norm[0]] = append(f.buckets[norm[0]], term{
+			norm:      norm,
+			mode:      mode,
+			collision: spec.collision,
+		})
 		f.numTerms++
 	}
 
@@ -177,6 +185,56 @@ func normalizeTerm(w string) ([]byte, error) {
 	return out, nil
 }
 
+// Matches reports whether the filter would censor anything in s, using the same
+// rules as Censor.
+func (f *Filter) Matches(s string) bool {
+	_, changed := f.Censor(s)
+	return changed
+}
+
+// MatchesName reports whether s is unusable as a nickname or other identifier.
+//
+// It is stricter than Matches: a term matches anywhere in the string rather than
+// only on word boundaries, so "xxkikexx" and "thegook" are caught. Padding a
+// slur is the obvious next move once the bare name is refused, and unlike prose
+// an identifier has no surrounding sentence for a word boundary to key off.
+//
+// The exception is terms marked as collisions — the handful with a real English
+// use. Those keep their boundary requirement, so "RaccoonFan" and "Spice_Girl"
+// stay usable while "coon" and "spic" on their own do not.
+//
+// This is a predicate only. Identifiers are refused, never censored: a starred
+// nickname still says what it was, and every starred name of the same length
+// collides with every other.
+func (f *Filter) MatchesName(s string) bool {
+	if f == nil || s == "" {
+		return false
+	}
+
+	sc := f.pool.Get().(*scratch)
+	defer f.pool.Put(sc)
+	sc.reset(s)
+
+	for i := 0; i < len(sc.norm); i++ {
+		b := sc.norm[i]
+		if isSep(b) {
+			continue
+		}
+		for _, t := range f.buckets[b] {
+			if matchAt(sc, i, t, true) < 0 {
+				continue
+			}
+			// An allowlisted word still wins, so "niggardly" is a legal name.
+			ws, we := wordBounds(sc, i, i+1)
+			if _, ok := f.allow[string(sc.norm[ws:we])]; ok {
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}
+
 // NumTerms reports how many terms the filter is matching against.
 func (f *Filter) NumTerms() int {
 	if f == nil {
@@ -214,7 +272,7 @@ func (f *Filter) Censor(s string) (string, bool) {
 		// leaving the tail exposed.
 		end := -1
 		for _, t := range f.buckets[b] {
-			if e := matchAt(sc, i, t); e > end {
+			if e := matchAt(sc, i, t, false); e > end {
 				end = e
 			}
 		}
@@ -259,7 +317,9 @@ func (f *Filter) Censor(s string) (string, bool) {
 // "n.i.g.g.e.r" matches. Whitespace is never skipped, which is what keeps a term
 // from being assembled across word boundaries. A wildcard in the term — from a
 // space in a multi-word entry like "porch monkey" — matches a run of either.
-func matchAt(sc *scratch, start int, t term) int {
+// nameMode relaxes the word-boundary requirement for every term that is not
+// marked as a collision, which is what makes MatchesName catch a padded slur.
+func matchAt(sc *scratch, start int, t term, nameMode bool) int {
 	norm := sc.norm
 	j := start
 	for k := 0; k < len(t.norm); k++ {
@@ -286,7 +346,11 @@ func matchAt(sc *scratch, start int, t term) int {
 		j++
 	}
 
-	if t.mode == matchWord && !(sc.boundaryAt(start-1) && sc.boundaryAt(j)) {
+	needsBoundaries := t.mode == matchWord
+	if nameMode && !t.collision {
+		needsBoundaries = false
+	}
+	if needsBoundaries && !(sc.boundaryAt(start-1) && sc.boundaryAt(j)) {
 		return -1
 	}
 	return j

@@ -447,6 +447,15 @@ func (s *Server) authenticateSSHKey(conn ssh.ConnMetadata, pubKey ssh.PublicKey)
 		username = "user" // Fallback
 	}
 
+	// Refuse a username the word filter matches. This is a separate entry point
+	// from SET_NICKNAME -- the name comes straight off the SSH connection -- so
+	// gating the other path does not cover it.
+	if s.wordFilter.MatchesName(username) {
+		log.Printf("SSH auto-register rejected from %s: username %q matches the word filter",
+			conn.RemoteAddr(), username)
+		return nil, fmt.Errorf("that username is not allowed")
+	}
+
 	// Reject if nickname is already registered (prevent impersonation)
 	existingUser, _ := s.db.GetUserByNickname(username)
 	if existingUser != nil {

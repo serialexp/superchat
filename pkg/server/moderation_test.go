@@ -243,6 +243,115 @@ func TestWordFilterConfigPlumbing(t *testing.T) {
 	})
 }
 
+// A nickname is refused, not starred: "~******" in every message header and
+// presence entry still says what it was meant to say.
+func TestSetNicknameRejectsFilteredNames(t *testing.T) {
+	srv, db := testServer(t)
+	defer db.Close()
+	enableWordFilter(t, srv, moderation.Options{})
+
+	sess := testSession(srv)
+
+	rejected := []string{
+		"nigger",
+		"NIGGER",
+		"n1gg3r",
+		"sandnigger",
+		"kike",
+		// Padded forms. These are the obvious next move once the bare name is
+		// refused, and a word-boundary match would let every one of them past.
+		"xxkikexx",
+		"thegook",
+		"kike123",
+		"Mr_Kike",
+		"Maine_Coon", // collision term, but bounded by the underscore
+	}
+	for _, name := range rejected {
+		frame, err := encodeSetNicknameMessage(&protocol.SetNicknameMessage{Nickname: name})
+		if err != nil {
+			t.Fatalf("encode %q: %v", name, err)
+		}
+		if err := srv.handleSetNickname(sess, frame); err != nil {
+			t.Fatalf("handleSetNickname(%q): %v", name, err)
+		}
+
+		current, ok := srv.sessions.GetSession(sess.ID)
+		if ok && current.Nickname == name {
+			t.Errorf("nickname %q was accepted; want it refused", name)
+		}
+	}
+}
+
+func TestSetNicknameAcceptsCleanNames(t *testing.T) {
+	srv, db := testServer(t)
+	defer db.Close()
+	enableWordFilter(t, srv, moderation.Options{})
+
+	sess := testSession(srv)
+
+	// Allowlisted stems, and names that only collide with a collision term as an
+	// unbounded substring -- those keep their word boundaries so ordinary names
+	// stay usable.
+	for _, name := range []string{"alice", "niggardly", "snigger", "RaccoonFan", "SpiceGirl", "Japan_Fan"} {
+		frame, err := encodeSetNicknameMessage(&protocol.SetNicknameMessage{Nickname: name})
+		if err != nil {
+			t.Fatalf("encode %q: %v", name, err)
+		}
+		if err := srv.handleSetNickname(sess, frame); err != nil {
+			t.Fatalf("handleSetNickname(%q): %v", name, err)
+		}
+
+		current, ok := srv.sessions.GetSession(sess.ID)
+		if !ok || current.Nickname != name {
+			got := ""
+			if ok {
+				got = current.Nickname
+			}
+			t.Errorf("nickname %q was refused (session has %q); want it accepted", name, got)
+		}
+	}
+}
+
+// MatchesName is deliberately stricter than Matches. Pin the difference so the
+// two do not quietly converge.
+func TestMatchesNameIsStricterThanMatches(t *testing.T) {
+	f, err := moderation.New(moderation.Options{})
+	if err != nil {
+		t.Fatalf("moderation.New: %v", err)
+	}
+
+	// Padded slurs: fine as prose (no word boundary), refused as a name.
+	for _, s := range []string{"xxkikexx", "thegook", "mywetbackaccount"} {
+		if f.Matches(s) {
+			t.Errorf("Matches(%q) = true; word-mode terms should need boundaries in prose", s)
+		}
+		if !f.MatchesName(s) {
+			t.Errorf("MatchesName(%q) = false; a padded slur must not be usable as a name", s)
+		}
+	}
+
+	// Collision terms keep their boundaries in both, so ordinary names survive.
+	for _, s := range []string{"RaccoonFan", "SpiceGirl", "Japan_Fan", "doowop_lover"} {
+		if f.MatchesName(s) {
+			t.Errorf("MatchesName(%q) = true; collision terms must stay word-bounded", s)
+		}
+	}
+
+	// ...but a collision term standing alone in a name is still refused.
+	for _, s := range []string{"coon", "Maine_Coon", "spic"} {
+		if !f.MatchesName(s) {
+			t.Errorf("MatchesName(%q) = false; a bounded collision term should be refused", s)
+		}
+	}
+
+	// The allowlist wins over MatchesName too.
+	for _, s := range []string{"niggardly", "snigger"} {
+		if f.MatchesName(s) {
+			t.Errorf("MatchesName(%q) = true; allowlisted words must stay usable", s)
+		}
+	}
+}
+
 // The retroactive pass is the thing that cleans up messages posted before the
 // filter existed — Bart's actual channels, not just new posts.
 func TestCensorExistingMessages(t *testing.T) {

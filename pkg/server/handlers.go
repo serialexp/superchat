@@ -432,6 +432,17 @@ func (s *Server) handleSetNickname(sess *Session, frame *protocol.Frame) error {
 		return s.sendMessage(sess, protocol.TypeNicknameResponse, resp)
 	}
 
+	// A nickname is refused rather than censored. Starring it would leave a
+	// "~******" in every message header and presence list, which is both ugly
+	// and still says what it was meant to say.
+	if s.rejectNickname(sess, msg.Nickname) {
+		resp := &protocol.NicknameResponseMessage{
+			Success: false,
+			Message: "That nickname isn't available. Please choose another.",
+		}
+		return s.sendMessage(sess, protocol.TypeNicknameResponse, resp)
+	}
+
 	// Check if nickname is registered
 	existingUser, err := s.db.GetUserByNickname(msg.Nickname)
 	isRegistered := (err == nil)

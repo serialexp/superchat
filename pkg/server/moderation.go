@@ -58,6 +58,35 @@ func newWordFilter(config ServerConfig) (*moderation.Filter, error) {
 	return filter, nil
 }
 
+// rejectNickname reports whether a nickname should be refused because the word
+// filter matches it, logging the attempt with the requester's IP when logging is
+// enabled.
+//
+// Nicknames are refused rather than censored: a starred nickname still tells
+// everyone what it was, appears in every message header and presence entry, and
+// collides with every other starred nickname of the same length.
+func (s *Server) rejectNickname(sess *Session, nickname string) bool {
+	if !s.wordFilter.MatchesName(nickname) {
+		return false
+	}
+
+	if s.config.WordFilterLog {
+		log.Printf("[filter] session %d (ip=%s) rejected nickname %q",
+			sess.ID, remoteHost(sess.RemoteAddr), nickname)
+	}
+	return true
+}
+
+// remoteHost strips the port from a session's remote address, falling back to
+// the raw value when it does not parse.
+func remoteHost(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return remoteAddr
+	}
+	return host
+}
+
 // censorContent runs posted content through the word filter, returning the text
 // that should actually be stored.
 //
@@ -81,12 +110,7 @@ func (s *Server) censorContent(sess *Session, content string) string {
 	nickname := sess.Nickname
 	sess.mu.RUnlock()
 
-	host, _, err := net.SplitHostPort(sess.RemoteAddr)
-	if err != nil {
-		host = sess.RemoteAddr
-	}
-
 	log.Printf("[filter] session %d (%s, ip=%s) posted filtered content; original: %q",
-		sess.ID, nickname, host, content)
+		sess.ID, nickname, remoteHost(sess.RemoteAddr), content)
 	return censored
 }

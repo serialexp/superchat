@@ -26,6 +26,13 @@ type termSpec struct {
 	// containing them is also a slur, and cover the exceptions in
 	// builtinAllowWords.
 	substring bool
+
+	// collision marks a term with a legitimate English use that context-free
+	// matching cannot distinguish. These keep word-boundary semantics even where
+	// matching is otherwise relaxed — see Filter.MatchesName, which matches
+	// everything else anywhere in a nickname but would otherwise refuse
+	// "RaccoonFan" and "Spice_Girl".
+	collision bool
 }
 
 // builtinTerms is the default list.
@@ -81,14 +88,21 @@ var builtinTerms = []termSpec{
 	{word: "dago"}, {word: "dagos"}, {word: "dagoes"},
 	{word: "yid"}, {word: "yids"},
 
-	{word: "chink"}, {word: "chinks"}, // COLLISION: "a chink in the armour"
-	{word: "coon"}, {word: "coons"}, // COLLISION: Maine Coon, surname Coon
-	{word: "spic"}, {word: "spics"}, // COLLISION: "spic and span"
-	{word: "spick"}, {word: "spicks"}, // COLLISION: "spick and span"
-	{word: "wop"}, {word: "wops"}, // COLLISION: doo-wop
-	{word: "jap"}, {word: "japs"}, // COLLISION: dated abbreviation
-	{word: "redskin"}, {word: "redskins"}, // COLLISION: potatoes, peanuts
-	{word: "squaw"}, {word: "squaws"}, // COLLISION: North American place names
+	// COLLISION: "a chink in the armour"
+	{word: "chink", collision: true}, {word: "chinks", collision: true},
+	// COLLISION: Maine Coon, raccoon, surname Coon
+	{word: "coon", collision: true}, {word: "coons", collision: true},
+	// COLLISION: "spic and span", spice
+	{word: "spic", collision: true}, {word: "spics", collision: true},
+	{word: "spick", collision: true}, {word: "spicks", collision: true},
+	// COLLISION: doo-wop
+	{word: "wop", collision: true}, {word: "wops", collision: true},
+	// COLLISION: dated abbreviation, Japan
+	{word: "jap", collision: true}, {word: "japs", collision: true},
+	// COLLISION: potatoes, peanuts
+	{word: "redskin", collision: true}, {word: "redskins", collision: true},
+	// COLLISION: North American place names
+	{word: "squaw", collision: true}, {word: "squaws", collision: true},
 }
 
 // builtinAllowWords are whole words that are never censored even though they

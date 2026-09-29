@@ -90,11 +90,13 @@ func NewStore(path string, filter *moderation.Filter) (*Store, error) {
 // reports any changes; Server.Start does that unconditionally on boot.
 func (s *Store) CensorExisting(ctx context.Context) (moderation.BackfillStats, error) {
 	return s.filter.Backfill(ctx, moderation.BackfillTarget{
-		Read:          s.db,
-		Write:         s.db,
-		Table:         "Message",
-		IDColumn:      "id",
-		ContentColumn: "content",
+		Read:     s.db,
+		Write:    s.db,
+		Table:    "Message",
+		IDColumn: "id",
+		// author_nickname is rendered into every message header in the published
+		// HTML, so it needs the same treatment as the body.
+		ContentColumns: []string{"content", "author_nickname"},
 	})
 }
 
@@ -289,6 +291,10 @@ func (s *Store) UpsertMessage(serverID int64, msg *gen.MessageSync) error {
 	}
 
 	content, _ := s.filter.Censor(msg.Content)
+	// The nickname is censored rather than refused here: by the time a message
+	// reaches the archive the name is a historical fact, and rejecting the row
+	// would lose the message instead of the name.
+	nickname, _ := s.filter.Censor(msg.AuthorNickname)
 
 	_, err = s.db.Exec(`
 		INSERT INTO Message (server_id, remote_id, channel_id, parent_id, thread_root_id,
@@ -299,7 +305,7 @@ func (s *Store) UpsertMessage(serverID int64, msg *gen.MessageSync) error {
 			edited_at = excluded.edited_at,
 			deleted_at = excluded.deleted_at
 	`, serverID, msg.MessageId, channelID, parentID, threadRootID,
-		msg.AuthorUserId, msg.AuthorNickname, content, msg.CreatedAt, msg.EditedAt, msg.DeletedAt)
+		msg.AuthorUserId, nickname, content, msg.CreatedAt, msg.EditedAt, msg.DeletedAt)
 	return err
 }
 
