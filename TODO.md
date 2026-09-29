@@ -68,15 +68,12 @@ is actually enforced.
       `User.nickname` is UNIQUE, so censoring it in the backfill could collide;
       it is left alone and registered authors display from that column. Needs an
       admin rename, or a forced-rename-on-login path.
-- [ ] **The archiver's word-filter flags are unreachable in Docker.**
-      `docker/archiver/entrypoint.sh` passes only `--listen`, `--db`, `--output`
-      and `--html-interval`, each from an `ARCHIVER_*` env var. The
-      `--word-filter*` flags fall through to their defaults (on), so the image
-      behaves correctly — but an operator running the container cannot turn the
-      filter off, or add/remove terms, without overriding the entrypoint. Add
-      `ARCHIVER_WORD_FILTER`, `ARCHIVER_WORD_FILTER_BACKFILL`,
-      `ARCHIVER_WORD_FILTER_EXTRA/REMOVE/ALLOW` passthrough in the same style.
-      Shipped in v0.6.0 without this.
+- [x] ~~**The archiver's word-filter flags are unreachable in Docker.**~~ Added
+      `ARCHIVER_WORD_FILTER`, `ARCHIVER_WORD_FILTER_BACKFILL` and
+      `ARCHIVER_WORD_FILTER_EXTRA/REMOVE/ALLOW` passthrough to
+      `docker/archiver/entrypoint.sh`, documented in DOCKER.md and
+      docker-compose.yml. The server's `SUPERCHAT_MODERATION_*` vars were
+      undocumented too and are now listed in DOCKER.md.
 - [ ] **Channel names/descriptions are not filtered** either. The archiver stores
       `Channel.description` and renders it into every channel page.
 - [ ] **The startup pass is unconditional, not incremental.** It reads the whole

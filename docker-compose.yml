@@ -46,6 +46,14 @@ services:
       # - ARCHIVER_LISTEN=:6470
       # - ARCHIVER_DB=/data/archive.db
       # - ARCHIVER_HTML_INTERVAL=300
+      #
+      # Word filter: the archiver censors independently of the server feeding
+      # it, since it keeps its own copy and publishes it as public HTML.
+      # - ARCHIVER_WORD_FILTER=true
+      # - ARCHIVER_WORD_FILTER_BACKFILL=true
+      # - ARCHIVER_WORD_FILTER_EXTRA=someterm,some phrase
+      # - ARCHIVER_WORD_FILTER_REMOVE=chink,coon
+      # - ARCHIVER_WORD_FILTER_ALLOW=someword
 
   website:
     image: aeolun/superchat-website:latest

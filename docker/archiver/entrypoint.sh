@@ -7,7 +7,12 @@ superchat-archiver \
   --listen "${ARCHIVER_LISTEN:-:6470}" \
   --db "${ARCHIVER_DB:-/data/archive.db}" \
   --output /usr/share/nginx/html/archive \
-  --html-interval "${ARCHIVER_HTML_INTERVAL:-300}" &
+  --html-interval "${ARCHIVER_HTML_INTERVAL:-300}" \
+  --word-filter="${ARCHIVER_WORD_FILTER:-true}" \
+  --word-filter-backfill="${ARCHIVER_WORD_FILTER_BACKFILL:-true}" \
+  --word-filter-extra "${ARCHIVER_WORD_FILTER_EXTRA:-}" \
+  --word-filter-remove "${ARCHIVER_WORD_FILTER_REMOVE:-}" \
+  --word-filter-allow "${ARCHIVER_WORD_FILTER_ALLOW:-}" &
 
 ARCHIVER_PID=$!
 

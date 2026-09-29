@@ -84,6 +84,33 @@ docker run -d \
 - `SUPERCHAT_DISCOVERY_SERVER_DESCRIPTION` - Description in directory (default: "A SuperChat community server")
 - `SUPERCHAT_DISCOVERY_MAX_USERS` - User limit, 0 = unlimited (default: 0)
 
+**Moderation Section:**
+- `SUPERCHAT_MODERATION_WORD_FILTER` - Censor racial slurs in message content, and refuse them as nicknames (default: true)
+- `SUPERCHAT_MODERATION_LOG_FILTERED` - Log censored messages and refused nicknames with author and IP (default: true)
+- `SUPERCHAT_MODERATION_BACKFILL_ON_START` - Censor already-stored messages during startup (default: true)
+- `SUPERCHAT_MODERATION_EXTRA_WORDS` - Comma-separated extra terms to censor
+- `SUPERCHAT_MODERATION_REMOVE_WORDS` - Comma-separated built-in terms to stop censoring
+- `SUPERCHAT_MODERATION_ALLOW_WORDS` - Comma-separated words to never censor
+
+A few built-in terms have a legitimate English use the filter cannot tell apart
+from the slur ("a chink in the armour", Maine Coon, "spick and span", doo-wop).
+Drop any you do not want with `SUPERCHAT_MODERATION_REMOVE_WORDS=chink,coon`.
+
+### Archiver Environment Variables
+
+The archiver filters independently of the server feeding it: it keeps its own
+copy of every message and publishes it as public HTML, so it does not assume the
+server was configured to censor.
+
+- `ARCHIVER_LISTEN` - Archive protocol listen address (default: `:6470`)
+- `ARCHIVER_DB` - Archive database path (default: `/data/archive.db`)
+- `ARCHIVER_HTML_INTERVAL` - HTML regeneration interval in seconds, 0 = only after backfill (default: 300)
+- `ARCHIVER_WORD_FILTER` - Censor racial slurs in archived content (default: true)
+- `ARCHIVER_WORD_FILTER_BACKFILL` - On startup, censor messages already archived (default: true)
+- `ARCHIVER_WORD_FILTER_EXTRA` - Comma-separated extra terms to censor
+- `ARCHIVER_WORD_FILTER_REMOVE` - Comma-separated built-in terms to stop censoring
+- `ARCHIVER_WORD_FILTER_ALLOW` - Comma-separated words to never censor
+
 ### Option 2: Config File
 
 To customize via config file:
