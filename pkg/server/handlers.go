@@ -1102,6 +1102,9 @@ func (s *Server) handlePostMessage(sess *Session, frame *protocol.Frame) error {
 		return s.sendError(sess, 6001, fmt.Sprintf("Message too long (max %d bytes)", s.config.MaxMessageLength))
 	}
 
+	// Censor before storing, so every downstream consumer gets clean content.
+	msg.Content = s.censorContent(sess, msg.Content)
+
 	// Convert IDs
 	var subchannelID, parentID *int64
 	if msg.SubchannelID != nil {
@@ -1205,6 +1208,11 @@ func (s *Server) handleEditMessage(sess *Session, frame *protocol.Frame) error {
 	if uint32(len(msg.NewContent)) > s.config.MaxMessageLength {
 		return s.sendError(sess, protocol.ErrCodeMessageTooLong, fmt.Sprintf("Message too long (max %d bytes)", s.config.MaxMessageLength))
 	}
+
+	// Censor before storing, so an edit cannot be used to sneak content past the
+	// filter. This also covers the MESSAGE_EDITED response and broadcast below,
+	// which echo msg.NewContent rather than re-reading the stored row.
+	msg.NewContent = s.censorContent(sess, msg.NewContent)
 
 	// Check if user is admin - admins can edit any message
 	isAdmin := s.isAdmin(sess)

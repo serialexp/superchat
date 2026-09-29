@@ -1,11 +1,13 @@
 package archiver
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
 
 	gen "github.com/aeolun/superchat/pkg/archive/generated"
+	"github.com/aeolun/superchat/pkg/moderation"
 	_ "modernc.org/sqlite"
 )
 
@@ -51,10 +53,16 @@ type MessageRow struct {
 // Store manages the archiver's persistent SQLite database.
 type Store struct {
 	db *sql.DB
+
+	// filter censors content on the way in. The superchat server already
+	// censors before forwarding, so this normally finds nothing — but the
+	// archiver can be fed by a server with the filter switched off, or an older
+	// build, and its output is published as public HTML. A nil filter is a no-op.
+	filter *moderation.Filter
 }
 
-// NewStore opens (or creates) the archive database.
-func NewStore(path string) (*Store, error) {
+// NewStore opens (or creates) the archive database. filter may be nil.
+func NewStore(path string, filter *moderation.Filter) (*Store, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("archiver: open db: %w", err)
@@ -71,7 +79,23 @@ func NewStore(path string) (*Store, error) {
 		return nil, fmt.Errorf("archiver: migrate: %w", err)
 	}
 
-	return &Store{db: db}, nil
+	return &Store{db: db, filter: filter}, nil
+}
+
+// CensorExisting applies the word filter to content already in the archive.
+//
+// The archiver has its own copy of every message, so censoring the superchat
+// server alone leaves the archive — and the static HTML generated from it —
+// showing the original text. Callers should regenerate HTML afterwards if this
+// reports any changes; Server.Start does that unconditionally on boot.
+func (s *Store) CensorExisting(ctx context.Context) (moderation.BackfillStats, error) {
+	return s.filter.Backfill(ctx, moderation.BackfillTarget{
+		Read:          s.db,
+		Write:         s.db,
+		Table:         "Message",
+		IDColumn:      "id",
+		ContentColumn: "content",
+	})
 }
 
 // Close closes the database.
@@ -264,6 +288,8 @@ func (s *Store) UpsertMessage(serverID int64, msg *gen.MessageSync) error {
 		}
 	}
 
+	content, _ := s.filter.Censor(msg.Content)
+
 	_, err = s.db.Exec(`
 		INSERT INTO Message (server_id, remote_id, channel_id, parent_id, thread_root_id,
 			author_user_id, author_nickname, content, created_at, edited_at, deleted_at)
@@ -273,25 +299,29 @@ func (s *Store) UpsertMessage(serverID int64, msg *gen.MessageSync) error {
 			edited_at = excluded.edited_at,
 			deleted_at = excluded.deleted_at
 	`, serverID, msg.MessageId, channelID, parentID, threadRootID,
-		msg.AuthorUserId, msg.AuthorNickname, msg.Content, msg.CreatedAt, msg.EditedAt, msg.DeletedAt)
+		msg.AuthorUserId, msg.AuthorNickname, content, msg.CreatedAt, msg.EditedAt, msg.DeletedAt)
 	return err
 }
 
 // UpdateMessage applies an edit to a message identified by server and remote ID.
 func (s *Store) UpdateMessage(serverID int64, msg *gen.MessageEdited) error {
+	content, _ := s.filter.Censor(msg.NewContent)
+
 	_, err := s.db.Exec(`
 		UPDATE Message SET content = ?, edited_at = ?
 		WHERE server_id = ? AND remote_id = ?
-	`, msg.NewContent, msg.EditedAt, serverID, msg.MessageId)
+	`, content, msg.EditedAt, serverID, msg.MessageId)
 	return err
 }
 
 // DeleteMessage applies a soft delete to a message identified by server and remote ID.
 func (s *Store) DeleteMessage(serverID int64, msg *gen.MessageDeleted) error {
+	content, _ := s.filter.Censor(msg.Content)
+
 	_, err := s.db.Exec(`
 		UPDATE Message SET deleted_at = ?, content = ?
 		WHERE server_id = ? AND remote_id = ?
-	`, msg.DeletedAt, msg.Content, serverID, msg.MessageId)
+	`, msg.DeletedAt, content, serverID, msg.MessageId)
 	return err
 }
 

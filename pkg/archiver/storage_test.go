@@ -6,12 +6,21 @@ import (
 	"testing"
 
 	gen "github.com/aeolun/superchat/pkg/archive/generated"
+	"github.com/aeolun/superchat/pkg/moderation"
 )
 
+// newTestStore builds a store with no word filter, so the existing tests
+// exercise storage behaviour in isolation. Use newTestStoreFiltered for the
+// filtering tests.
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
+	return newStoreWithFilter(t, nil)
+}
+
+func newStoreWithFilter(t *testing.T, filter *moderation.Filter) *Store {
+	t.Helper()
 	dir := t.TempDir()
-	store, err := NewStore(filepath.Join(dir, "test.db"))
+	store, err := NewStore(filepath.Join(dir, "test.db"), filter)
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}

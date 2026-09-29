@@ -12,12 +12,34 @@ import (
 
 // TOMLConfig represents the structure of the server config file
 type TOMLConfig struct {
-	Server    ServerSection    `toml:"server"`
-	Limits    LimitsSection    `toml:"limits"`
-	Retention RetentionSection `toml:"retention"`
-	Channels  ChannelsSection  `toml:"channels"`
-	Discovery DiscoverySection `toml:"discovery"`
-	Archive   ArchiveSection   `toml:"archive"`
+	Server     ServerSection     `toml:"server"`
+	Limits     LimitsSection     `toml:"limits"`
+	Retention  RetentionSection  `toml:"retention"`
+	Channels   ChannelsSection   `toml:"channels"`
+	Discovery  DiscoverySection  `toml:"discovery"`
+	Archive    ArchiveSection    `toml:"archive"`
+	Moderation ModerationSection `toml:"moderation"`
+}
+
+// ModerationSection configures the content word filter.
+type ModerationSection struct {
+	// WordFilter is a pointer so that "absent from the config file" is
+	// distinguishable from "explicitly set to false". Absent means enabled.
+	WordFilter *bool `toml:"word_filter"`
+
+	ExtraWords  []string `toml:"extra_words"`
+	RemoveWords []string `toml:"remove_words"`
+	AllowWords  []string `toml:"allow_words"`
+
+	// LogFiltered records every censored message to the server log along with
+	// the author's nickname and IP address, which is the only place an
+	// anonymous poster's IP is otherwise visible.
+	LogFiltered *bool `toml:"log_filtered"`
+
+	// BackfillOnStart censors already-stored messages during startup, so that
+	// history posted before the filter (or before a term was added) is cleaned
+	// up too. Costs one pass over the Message table per boot.
+	BackfillOnStart *bool `toml:"backfill_on_start"`
 }
 
 type ArchiveSection struct {
@@ -61,11 +83,11 @@ type SeedChannel struct {
 }
 
 type DiscoverySection struct {
-	DirectoryEnabled bool   `toml:"directory_enabled"`
-	PublicHostname   string `toml:"public_hostname"`
-	ServerName       string `toml:"server_name"`
+	DirectoryEnabled  bool   `toml:"directory_enabled"`
+	PublicHostname    string `toml:"public_hostname"`
+	ServerName        string `toml:"server_name"`
 	ServerDescription string `toml:"server_description"`
-	MaxUsers         int    `toml:"max_users"`
+	MaxUsers          int    `toml:"max_users"`
 }
 
 // DefaultTOMLConfig returns the default TOML configuration
@@ -101,11 +123,11 @@ func DefaultTOMLConfig() TOMLConfig {
 			},
 		},
 		Discovery: DiscoverySection{
-			DirectoryEnabled: true,
-			PublicHostname:   "", // Auto-detect if empty
-			ServerName:       "SuperChat Server",
+			DirectoryEnabled:  true,
+			PublicHostname:    "", // Auto-detect if empty
+			ServerName:        "SuperChat Server",
 			ServerDescription: "A SuperChat community server",
-			MaxUsers:         0, // 0 = unlimited
+			MaxUsers:          0, // 0 = unlimited
 		},
 	}
 }
@@ -267,7 +289,46 @@ func applyEnvOverrides(config TOMLConfig) TOMLConfig {
 		config.Archive.Endpoint = val
 	}
 
+	// Moderation section
+	if val := os.Getenv("SUPERCHAT_MODERATION_WORD_FILTER"); val != "" {
+		if enabled, err := strconv.ParseBool(val); err == nil {
+			config.Moderation.WordFilter = &enabled
+		}
+	}
+	if val := os.Getenv("SUPERCHAT_MODERATION_LOG_FILTERED"); val != "" {
+		if enabled, err := strconv.ParseBool(val); err == nil {
+			config.Moderation.LogFiltered = &enabled
+		}
+	}
+	if val := os.Getenv("SUPERCHAT_MODERATION_BACKFILL_ON_START"); val != "" {
+		if enabled, err := strconv.ParseBool(val); err == nil {
+			config.Moderation.BackfillOnStart = &enabled
+		}
+	}
+	if val := os.Getenv("SUPERCHAT_MODERATION_EXTRA_WORDS"); val != "" {
+		config.Moderation.ExtraWords = splitCommaList(val)
+	}
+	if val := os.Getenv("SUPERCHAT_MODERATION_REMOVE_WORDS"); val != "" {
+		config.Moderation.RemoveWords = splitCommaList(val)
+	}
+	if val := os.Getenv("SUPERCHAT_MODERATION_ALLOW_WORDS"); val != "" {
+		config.Moderation.AllowWords = splitCommaList(val)
+	}
+
 	return config
+}
+
+// splitCommaList parses a comma-separated environment variable into a trimmed,
+// non-empty list. Multi-word terms are still possible: only commas separate.
+func splitCommaList(val string) []string {
+	parts := strings.Split(val, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // writeDefaultConfig writes the default config to a file with all options documented
@@ -391,6 +452,38 @@ server_description = "A SuperChat community server"
 # Address of the archive service
 # Uncomment and set your archiver address:
 # endpoint = "localhost:6470"
+
+[moderation]
+# Replace racial and ethnic slurs in message content with asterisks.
+# Filtering happens before the message is stored, so it applies everywhere:
+# live broadcasts, history, the archive service, and published HTML.
+# Enabled by default. Uncomment to turn it off:
+# word_filter = false
+
+# Log every censored message to server.log with the author's nickname and IP.
+# This is the only place an anonymous poster's IP address is visible, so it is
+# also how you find out who to ban. Enabled by default.
+# log_filtered = false
+
+# Censor already-stored messages during startup, so history posted before the
+# filter -- or before you added a term to extra_words -- gets cleaned up too.
+# Costs one pass over the Message table per boot; rows that are already clean
+# are read but not rewritten. Enabled by default. Turn off once history is known
+# to be clean and you want a faster startup:
+# backfill_on_start = false
+
+# Additional terms to censor, on top of the built-in list. A term with a space
+# in it matches any separator, so "porch monkey" also catches "porch-monkey".
+# extra_words = ["someterm", "some phrase"]
+
+# Built-in terms to stop censoring. A few built-ins have a legitimate English
+# use that the filter cannot tell apart from the slur -- "a chink in the
+# armour", "Maine Coon", "spick and span", "doo-wop". Drop any you do not want:
+# remove_words = ["chink", "chinks", "coon", "coons"]
+
+# Whole words that are never censored even if they contain a term. The built-in
+# list already exempts niggardly, niggling, snigger and friends.
+# allow_words = ["someword"]
 `
 
 	if _, err := f.WriteString(content); err != nil {
@@ -483,6 +576,21 @@ func (c *TOMLConfig) ToServerConfig() ServerConfig {
 	if c.Server.AdminPassword != "" {
 		cfg.AdminPassword = c.Server.AdminPassword
 	}
+
+	// Moderation configuration. WordFilter and LogFiltered default to enabled,
+	// so only an explicit value in the config file changes them.
+	if c.Moderation.WordFilter != nil {
+		cfg.WordFilterEnabled = *c.Moderation.WordFilter
+	}
+	if c.Moderation.LogFiltered != nil {
+		cfg.WordFilterLog = *c.Moderation.LogFiltered
+	}
+	if c.Moderation.BackfillOnStart != nil {
+		cfg.WordFilterBackfill = *c.Moderation.BackfillOnStart
+	}
+	cfg.WordFilterExtra = c.Moderation.ExtraWords
+	cfg.WordFilterRemove = c.Moderation.RemoveWords
+	cfg.WordFilterAllow = c.Moderation.AllowWords
 
 	// Archive configuration
 	cfg.ArchiveEnabled = c.Archive.Enabled

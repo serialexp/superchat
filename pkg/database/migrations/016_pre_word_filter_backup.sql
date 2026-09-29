@@ -1,0 +1,20 @@
+-- No-op migration.
+--
+-- This migration deliberately changes nothing. It exists to force the migration
+-- runner to take its automatic pre-migration backup
+-- (superchat.db.backup-v15-<timestamp>) on the first startup after the word
+-- filter ships.
+--
+-- The word filter's retroactive pass rewrites Message.content in place and is
+-- irreversible: a message starred by a false positive cannot be recovered from
+-- the database afterwards. Nothing else in the release triggers a backup,
+-- because the filter needs no schema change. Rather than rely on the operator
+-- remembering to copy the file by hand, the release carries this.
+--
+-- backupDatabase only runs when there is at least one pending migration, so the
+-- backup is a side effect of this file existing and being unapplied. Once
+-- applied it never runs again.
+--
+-- Do not copy this pattern for anything other than "I need the pre-migration
+-- backup to happen". A real schema change belongs in its own numbered file.
+SELECT 1;

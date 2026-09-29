@@ -21,6 +21,7 @@ import (
 
 	"github.com/aeolun/superchat/pkg/archive"
 	"github.com/aeolun/superchat/pkg/database"
+	"github.com/aeolun/superchat/pkg/moderation"
 	"github.com/aeolun/superchat/pkg/protocol"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/crypto/argon2"
@@ -64,6 +65,10 @@ type Server struct {
 
 	// Archive
 	archiveClient *archive.Client
+
+	// Content moderation. nil when the word filter is disabled; Censor is a
+	// no-op on a nil filter, so call sites do not need to check.
+	wordFilter *moderation.Filter
 }
 
 // ServerConfig holds server configuration
@@ -96,6 +101,14 @@ type ServerConfig struct {
 	// Archive configuration
 	ArchiveEnabled  bool   // If true, forward messages to archiver (default for all channels)
 	ArchiveEndpoint string // Address of the archive service (e.g., "localhost:6470")
+
+	// Moderation configuration
+	WordFilterEnabled  bool     // If true, censor slurs in message content before storing it
+	WordFilterLog      bool     // If true, log every censored message with nickname and IP
+	WordFilterBackfill bool     // If true, censor already-stored messages during startup
+	WordFilterExtra    []string // Additional terms to censor
+	WordFilterRemove   []string // Built-in terms to stop censoring
+	WordFilterAllow    []string // Whole words that are never censored
 }
 
 // DefaultConfig returns default server configuration
@@ -121,6 +134,11 @@ func DefaultConfig() ServerConfig {
 		ServerName:     "SuperChat Server",
 		ServerDesc:     "A SuperChat server",
 		MaxUsers:       0, // unlimited
+
+		// Moderation: the word filter is on unless a server turns it off.
+		WordFilterEnabled:  true,
+		WordFilterLog:      true,
+		WordFilterBackfill: true,
 	}
 }
 
@@ -136,6 +154,25 @@ func NewServer(dbPath string, config ServerConfig, configPath string) (*Server, 
 	if err := sqliteDB.SeedDefaultChannels(); err != nil {
 		sqliteDB.Close()
 		return nil, fmt.Errorf("failed to seed channels: %w", err)
+	}
+
+	// Build the word filter before the MemDB loads, so that the retroactive pass
+	// below can clean the stored content first and the in-memory copy is built
+	// from censored text.
+	wordFilter, err := newWordFilter(config)
+	if err != nil {
+		sqliteDB.Close()
+		return nil, err
+	}
+	if wordFilter != nil {
+		log.Printf("Word filter enabled (%d terms)", wordFilter.NumTerms())
+
+		if config.WordFilterBackfill {
+			if err := censorExistingMessages(sqliteDB, wordFilter); err != nil {
+				sqliteDB.Close()
+				return nil, err
+			}
+		}
 	}
 
 	// Create in-memory database with 30-second snapshot interval
@@ -177,6 +214,8 @@ func NewServer(dbPath string, config ServerConfig, configPath string) (*Server, 
 		discoveryRateLimits:    make(map[string]*discoveryRateLimiter),
 		autoRegisterAttempts:   make(map[string][]time.Time),
 	}
+
+	server.wordFilter = wordFilter
 
 	// Initialize archive client if enabled
 	if config.ArchiveEnabled && config.ArchiveEndpoint != "" {

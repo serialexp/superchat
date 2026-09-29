@@ -1,9 +1,14 @@
 package archiver
 
 import (
+	"context"
+	"fmt"
 	"log"
 	"net"
 	"sync"
+	"time"
+
+	"github.com/aeolun/superchat/pkg/moderation"
 )
 
 // Config holds archiver configuration.
@@ -12,6 +17,16 @@ type Config struct {
 	DBPath              string
 	OutputDir           string
 	HTMLIntervalSeconds int
+
+	// Moderation. The archiver filters independently of the superchat server
+	// feeding it: it holds its own copy of every message and publishes it as
+	// public HTML, so it cannot rely on the server having been configured to
+	// censor. WordFilterBackfill cleans messages archived before the filter.
+	WordFilter         bool
+	WordFilterBackfill bool
+	WordFilterExtra    []string
+	WordFilterRemove   []string
+	WordFilterAllow    []string
 }
 
 // Server is the archive service that receives messages from superchat servers
@@ -27,9 +42,41 @@ type Server struct {
 
 // New creates a new archiver server.
 func New(cfg Config) (*Server, error) {
-	store, err := NewStore(cfg.DBPath)
+	var filter *moderation.Filter
+	if cfg.WordFilter {
+		f, err := moderation.New(moderation.Options{
+			ExtraWords:  cfg.WordFilterExtra,
+			RemoveWords: cfg.WordFilterRemove,
+			AllowWords:  cfg.WordFilterAllow,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("archiver: invalid word list: %w", err)
+		}
+		filter = f
+		log.Printf("[archiver] word filter enabled (%d terms)", filter.NumTerms())
+	}
+
+	store, err := NewStore(cfg.DBPath, filter)
 	if err != nil {
 		return nil, err
+	}
+
+	// Clean content archived before the filter existed. This has to happen
+	// before Start generates HTML, or the published pages keep the old text.
+	if filter != nil && cfg.WordFilterBackfill {
+		start := time.Now()
+		stats, err := store.CensorExisting(context.Background())
+		if err != nil {
+			store.Close()
+			return nil, fmt.Errorf("archiver: word filter backfill: %w", err)
+		}
+		if stats.Changed > 0 {
+			log.Printf("[archiver] word filter: censored %d of %d archived messages in %s",
+				stats.Changed, stats.Scanned, time.Since(start).Round(time.Millisecond))
+		} else {
+			log.Printf("[archiver] word filter: scanned %d archived messages, nothing to censor (%s)",
+				stats.Scanned, time.Since(start).Round(time.Millisecond))
+		}
 	}
 
 	htmlGen := NewHTMLGenerator(cfg.OutputDir, store)

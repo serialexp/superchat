@@ -18,6 +18,23 @@ session_timeout_seconds = 60
 default_retention_hours = 168  # 7 days
 cleanup_interval_minutes = 60
 
+[moderation]
+# Replace racial and ethnic slurs with asterisks before the message is stored,
+# so the filter covers live broadcasts, history, the archiver and its HTML.
+word_filter = true
+
+# Log censored messages with the author's nickname and IP (how you find out who
+# to ban -- an anonymous poster's IP is not visible anywhere else).
+log_filtered = true
+
+# Censor already-stored messages on startup, so history and newly-added terms
+# are covered. One pass over the Message table per boot.
+backfill_on_start = true
+
+# extra_words  = ["someterm", "some phrase"]
+# remove_words = ["chink", "coon"]  # built-ins with legitimate English uses
+# allow_words  = ["someword"]
+
 [channels]
 # Default channels to seed on first run
 seed_channels = [

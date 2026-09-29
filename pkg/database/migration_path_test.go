@@ -633,6 +633,78 @@ func TestMigrationPath(t *testing.T) {
 				}
 			},
 		},
+		{
+			// 016 is a deliberate no-op whose only purpose is to make the
+			// migration runner take its pre-migration backup before the word
+			// filter rewrites Message.content. So what needs proving is the
+			// opposite of the usual: that it changes nothing at all.
+			name:        "v15 → v16: No-op migration leaves data and schema untouched",
+			fromVersion: 15,
+			toVersion:   16,
+			setupData: func(db *sql.DB) error {
+				now := time.Now().UnixMilli()
+
+				if _, err := db.Exec(`
+					INSERT INTO Channel (id, name, display_name, channel_type, message_retention_hours, is_private, created_at)
+					VALUES (1, 'general', 'General', 1, 168, 0, ?)
+				`, now); err != nil {
+					return err
+				}
+				_, err := db.Exec(`
+					INSERT INTO Message (id, channel_id, author_nickname, content, created_at)
+					VALUES (1, 1, 'alice', 'hello there', ?)
+				`, now)
+				return err
+			},
+			validateData: func(db *sql.DB, t *testing.T) {
+				// Content must survive verbatim. The filter's own pass is a
+				// separate step that does not run inside migrations.
+				var content string
+				if err := db.QueryRow("SELECT content FROM Message WHERE id = 1").Scan(&content); err != nil {
+					t.Fatalf("Failed to query message content: %v", err)
+				}
+				if content != "hello there" {
+					t.Errorf("content = %q, want %q unchanged by a no-op migration", content, "hello there")
+				}
+
+				var channelCount, messageCount int
+				if err := db.QueryRow("SELECT COUNT(*) FROM Channel").Scan(&channelCount); err != nil {
+					t.Fatalf("Failed to count channels: %v", err)
+				}
+				if err := db.QueryRow("SELECT COUNT(*) FROM Message").Scan(&messageCount); err != nil {
+					t.Fatalf("Failed to count messages: %v", err)
+				}
+				if channelCount != 1 || messageCount != 1 {
+					t.Errorf("got %d channels and %d messages, want 1 and 1", channelCount, messageCount)
+				}
+			},
+			validateSchema: func(db *sql.DB, t *testing.T) {
+				// The migration must not have dropped anything it found.
+				for _, required := range []string{"Channel", "Message", "MessageVersion", "User"} {
+					var count int
+					if err := db.QueryRow(`
+						SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?
+					`, required).Scan(&count); err != nil {
+						t.Fatalf("Failed to check table %s: %v", required, err)
+					}
+					if count != 1 {
+						t.Errorf("table %s missing after no-op migration", required)
+					}
+				}
+
+				// Message.content must still be the plain TEXT column the filter
+				// rewrites, not something the no-op accidentally altered.
+				var colType string
+				if err := db.QueryRow(`
+					SELECT type FROM pragma_table_info('Message') WHERE name = 'content'
+				`).Scan(&colType); err != nil {
+					t.Fatalf("Failed to check Message.content: %v", err)
+				}
+				if colType != "TEXT" {
+					t.Errorf("Message.content type = %q, want TEXT", colType)
+				}
+			},
+		},
 	}
 
 	for _, tt := range migrationTests {
